@@ -200,10 +200,20 @@ def to_float(v):
 
 
 # ----------------------------------------------------------------------------- TARGET 1: held-out
-def run_heldout(base_url, ft_url, n, args):
+def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held-out"):
+    """Score the held-out 5-field vol set.
+
+    system_override=None  -> use each row's OWN bare vol-technician system prompt
+                             (the default; behavior unchanged).
+    system_override=<str> -> replace the per-row system prompt with this string for
+                             every row (used by run_skew to wrap the rows in the REAL
+                             production strategist context — measures train/serve skew).
+    label_tag just relabels the printed prefixes (e.g. "skew") so the two slices are
+    distinguishable in the log; everything else is identical.
+    """
     path = args.heldout
     if not os.path.exists(path):
-        print("  [held-out] SKIP — %s not found (training not finished yet?)" % path)
+        print("  [%s] SKIP — %s not found (training not finished yet?)" % (label_tag, path))
         return None
     rows = []
     with open(path) as f:
@@ -212,13 +222,15 @@ def run_heldout(base_url, ft_url, n, args):
             if line:
                 rows.append(json.loads(line))
     if not rows:
-        print("  [held-out] SKIP — file empty")
+        print("  [%s] SKIP — file empty" % label_tag)
         return None
     if n and n < len(rows):
         # deterministic stride sample for reproducibility
         step = max(1, len(rows) // n)
         rows = rows[::step][:n]
-    print("  [held-out] %d rows from %s" % (len(rows), path))
+    print("  [%s] %d rows from %s%s" % (
+        label_tag, len(rows), path,
+        " (production system prompt)" if system_override else ""))
 
     out = {}
     for label, url in ([("BASE", base_url)] + ([("FT", ft_url)] if ft_url != base_url else [])):
@@ -235,6 +247,9 @@ def run_heldout(base_url, ft_url, n, args):
             user = next((m["content"] for m in msgs if m["role"] == "user"), None)
             gt_raw = next((m["content"] for m in msgs if m["role"] == "assistant"), None)
             gt = extract_json(gt_raw) or {}
+            # skew slice: swap the bare vol prompt for the production strategist context
+            if system_override is not None:
+                system = system_override
             mm = ([{"role": "system", "content": system}] if system else []) + \
                  [{"role": "user", "content": user}]
             txt, _, _, _, err = chat_text(url, mm, max_tokens=args.move_max_tokens,
@@ -291,14 +306,14 @@ def run_heldout(base_url, ft_url, n, args):
             "secs": round(secs, 1),
             "model": model,
         }
-        print("  [held-out:%s] parse=%.1f%% move_acc=%.1f%% dir_acc=%.1f%% mae=%s (%.0fs)" % (
-            label, 100 * out[label]["parse_rate"], 100 * out[label]["move_acc"],
+        print("  [%s:%s] parse=%.1f%% move_acc=%.1f%% dir_acc=%.1f%% mae=%s (%.0fs)" % (
+            label_tag, label, 100 * out[label]["parse_rate"], 100 * out[label]["move_acc"],
             100 * out[label]["dir_acc"],
             ("%.3f" % out[label]["exp_move_mae"]) if out[label]["exp_move_mae"] is not None else "n/a",
             secs))
         calib_str = " ".join("%s=%s" % (k, ("%.0f%%" % (100 * calibration[k]["acc"]) if calibration[k]["acc"] is not None else "n/a")) for k in ("low_1_4", "mid_5_7", "high_8_10"))
-        print("  [held-out:%s] vol_change_acc=%.1f%% vs_iv_acc=%.1f%% | call-acc by conviction: %s" % (
-            label, 100 * out[label]["vol_change_acc"], 100 * out[label]["vs_iv_acc"], calib_str))
+        print("  [%s:%s] vol_change_acc=%.1f%% vs_iv_acc=%.1f%% | call-acc by conviction: %s" % (
+            label_tag, label, 100 * out[label]["vol_change_acc"], 100 * out[label]["vs_iv_acc"], calib_str))
         # majority-baseline + balanced-accuracy (skew-robust) per categorical field
         def _field_metrics(field, normfn):
             pairs = [(normfn(pr["gt"].get(field)), normfn(pr["pred"].get(field))) for pr in preds]
@@ -314,15 +329,19 @@ def run_heldout(base_url, ft_url, n, args):
         fm = {f: _field_metrics(f, nf) for f, nf in
               (("move", norm_move), ("vol_change", norm_cat), ("vs_iv", norm_cat), ("call", norm_dir))}
         out[label]["field_metrics"] = fm
-        print("  [held-out:%s]  field        raw  / major / balncd / lift" % label)
+        print("  [%s:%s]  field        raw  / major / balncd / lift" % (label_tag, label))
         for _f, _m in fm.items():
             if _m:
                 print("                 %-11s %5.1f%% /%5.1f%% /%5.1f%% / %+5.1fpp" % (
                     _f, 100 * _m["raw"], 100 * _m["majority"], 100 * _m["balanced"], 100 * _m["lift"]))
 
     # --- optional: token-level loss / perplexity on the assistant answer ---
+    # PPL uses the row's GROUND-TRUTH answer under the row's OWN (bare vol) prompt, so it
+    # only makes sense for the default slice — skip it under a system_override.
     ppl = None
-    if args.hf_base and args.hf_ft:
+    if system_override is not None:
+        pass  # skew slice: skip perplexity (GT answer is conditioned on the bare prompt)
+    elif args.hf_base and args.hf_ft:
         ppl = heldout_perplexity(rows, args)
     else:
         print("  [held-out:ppl] SKIP token-loss/perplexity — pass --hf-base and --hf-ft to enable")
@@ -330,6 +349,93 @@ def run_heldout(base_url, ft_url, n, args):
         out["BASE"]["ppl"] = ppl["BASE"]
         out["FT"]["ppl"] = ppl["FT"]
     return out
+
+
+# ----------------------------------------------------------------------------- TARGET 1b: train/serve skew
+# The 5-field vol JSON is a TRAINING-ONLY auxiliary skill — production never emits it.
+# In production the model runs under the LOCKED strategist system prompt
+# (exitmgr.strategist.SYSTEM_PROMPT). run_skew() re-scores the SAME held-out rows, but
+# wraps them in that real production context (plus a one-line redirect back to the
+# scorable 5-field schema) instead of the bare vol-technician prompt. The gap between
+# this and the default held-out slice = capability degradation under production framing.
+
+# default exitmgr location; override with $EXITMGR_DIR or --exitmgr-dir
+DEFAULT_EXITMGR_DIR = os.path.join(HOME, "exitmgr-app")
+
+# one-line redirect appended after the production SYSTEM_PROMPT to ask for the scorable schema
+SKEW_FORMAT_REDIRECT = (
+    'For THIS request only, ignore the trade-idea output format above. You are assessing '
+    'volatility for the following instrument. Answer ONLY as JSON: '
+    '{"move":"QUIET|NORMAL|ELEVATED|EXPLOSIVE","exp_move_pct":number,'
+    '"vol_change":"EXPANDING|STABLE|CONTRACTING","vs_iv":"CHEAP|FAIR|RICH",'
+    '"call":"BULLISH|BEARISH|NEUTRAL","conviction":1-10}.'
+)
+
+
+def load_production_system_prompt(args):
+    """Pull the LIVE production strategist SYSTEM_PROMPT so the skew slice tracks the
+    real prompt if you edit strategist.py. Tries an import first; falls back to
+    statically extracting the constant. Returns the prompt string, or None (with a
+    printed warning) so the skew slice can be skipped without breaking other runs."""
+    exitmgr_dir = (getattr(args, "exitmgr_dir", None)
+                   or os.environ.get("EXITMGR_DIR")
+                   or DEFAULT_EXITMGR_DIR)
+    strat_path = os.path.join(exitmgr_dir, "exitmgr", "strategist.py")
+    # 1) preferred: import exitmgr.strategist and read SYSTEM_PROMPT (tracks live edits)
+    try:
+        if exitmgr_dir not in sys.path:
+            sys.path.insert(0, exitmgr_dir)
+        from exitmgr.strategist import SYSTEM_PROMPT as _SP  # type: ignore
+        if isinstance(_SP, str) and _SP.strip():
+            return _SP
+    except Exception as e:
+        print("  [skew] import of exitmgr.strategist failed (%s) — trying static read" % str(e)[:120])
+    # 2) fallback: evaluate just the SYSTEM_PROMPT assignment from the source file
+    try:
+        if not os.path.exists(strat_path):
+            print("  [skew] SKIP — strategist.py not found at %s" % strat_path)
+            return None
+        import ast
+        src = open(strat_path).read()
+        tree = ast.parse(src)
+        ns = {}
+        for node in tree.body:
+            # collect the string-constant helpers + the SYSTEM_PROMPT assignment, which is
+            # a pure string-concat of those constants (no imports / side effects).
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                if name in ("_UNIVERSE", "_SCORING", "_CONTRACT", "SYSTEM_PROMPT"):
+                    try:
+                        ns[name] = eval(compile(ast.Expression(node.value), strat_path, "eval"), {}, ns)
+                    except Exception:
+                        pass
+                    if name == "SYSTEM_PROMPT" and isinstance(ns.get("SYSTEM_PROMPT"), str):
+                        return ns["SYSTEM_PROMPT"]
+        print("  [skew] SKIP — could not extract SYSTEM_PROMPT from %s" % strat_path)
+        return None
+    except Exception as e:
+        print("  [skew] SKIP — failed to load production prompt (%s)" % str(e)[:160])
+        return None
+
+
+def build_skew_system_prompt(args):
+    """Production SYSTEM_PROMPT + blank line + the 5-field format redirect. None if unloadable."""
+    sp = load_production_system_prompt(args)
+    if not sp:
+        return None
+    return sp + "\n\n" + SKEW_FORMAT_REDIRECT
+
+
+def run_skew(base_url, ft_url, n, args):
+    """Train/serve-skew slice: identical to run_heldout() but with the production
+    strategist system prompt wrapped around each held-out row. Additive; never touches
+    the default held-out behavior."""
+    skew_sys = build_skew_system_prompt(args)
+    if not skew_sys:
+        print("  [skew] SKIP — production system prompt unavailable (see warnings above)")
+        return None
+    return run_heldout(base_url, ft_url, n, args,
+                       system_override=skew_sys, label_tag="skew")
 
 
 def heldout_perplexity(rows, args):
@@ -585,6 +691,57 @@ def report(results, args):
         if d_mae is not None and d_mae < 0:
             verdict_lines.append("held-out: FT exp_move_pct MAE improved by %.3f." % (-d_mae))
 
+    # --- TARGET 1b: train/serve skew (baseline bare prompt vs production prompt) ---
+    sk = results.get("skew")
+    if ho and sk:
+        # compare on the production-served model: prefer FT side if present, else BASE
+        side = "FT" if (ho.get("FT") and sk.get("FT")) else "BASE"
+        b, s = ho.get(side), sk.get(side)
+        if b and s:
+            print("\n[1b] TRAIN/SERVE SKEW  (%s model: bare vol prompt vs PRODUCTION prompt)" % side)
+            print("  metric scored on the SAME held-out rows; Δ<0 = degradation under prod context")
+            print("  %-16s %12s %12s %10s" % ("metric", "baseline", "skew(prod)", "Δ (skew-base)"))
+
+            def skline(name, key, fmt="%.1f%%", better_high=True, scale=100.0):
+                bv, sv = b.get(key), s.get(key)
+                if bv is None or sv is None:
+                    print("  %-16s %12s %12s %10s" % (name, "n/a", "n/a", "—"))
+                    return None
+                d = sv - bv
+                arrow = ""
+                if (better_high and d > 0) or (not better_high and d < 0):
+                    arrow = " ✓prod"
+                elif d != 0:
+                    arrow = " ⚠skew"
+                print("  %-16s %12s %12s %+9s%s" % (
+                    name, fmt % (bv * scale), fmt % (sv * scale), fmt % (d * scale), arrow))
+                return d
+            d_pm = skline("move_acc", "move_acc")
+            skline("dir_acc", "dir_acc")
+            skline("vol_change_acc", "vol_change_acc")
+            skline("vs_iv_acc", "vs_iv_acc")
+            skline("parse_rate", "parse_rate")
+            d_pmae = skline("exp_move_mae", "exp_move_mae", "%.3f", better_high=False, scale=1.0)
+            worst = []
+            if d_pm is not None and d_pm < -0.02:
+                worst.append("move_acc %.1fpp" % (d_pm * 100))
+            if d_pmae is not None and d_pmae > 0.0:
+                worst.append("exp_move MAE +%.3f" % d_pmae)
+            if worst:
+                verdict_lines.append("⚠ skew (%s): vol skill degrades under production prompt — %s." % (
+                    side, ", ".join(worst)))
+            else:
+                verdict_lines.append("skew (%s): vol skill holds under the production prompt (no major drop)." % side)
+    elif sk and not ho:
+        # skew ran but baseline didn't (e.g. --mode that produced no held-out) — still show it
+        print("\n[1b] TRAIN/SERVE SKEW  (production prompt; no bare-prompt baseline in this run)")
+        for sd in ("BASE", "FT"):
+            r = sk.get(sd)
+            if r:
+                print("  %-4s move_acc=%.1f%% dir_acc=%.1f%% vol=%.1f%% vs_iv=%.1f%% parse=%.1f%%" % (
+                    sd, 100 * r["move_acc"], 100 * r["dir_acc"], 100 * r["vol_change_acc"],
+                    100 * r["vs_iv_acc"], 100 * r["parse_rate"]))
+
     # --- TARGET 2 & 3: gauntlets ---
     for tag, title in [("trading-gauntlet", "[2] TRADING GAUNTLET (trader/trademath/tickers)"),
                        ("gordon", "[3] GORDON GAUNTLET (general-ability regression)")]:
@@ -647,6 +804,12 @@ def main():
     ap.add_argument("--mode", default="all", choices=["held-out", "trading-gauntlet", "gordon", "all"])
     ap.add_argument("--n", type=int, default=300, help="held-out sample size (rows)")
     ap.add_argument("--heldout", default=DEFAULT_HELDOUT, help="path to heldout_trading.jsonl")
+    ap.add_argument("--skew", action="store_true",
+                    help="ALSO run the train/serve-skew slice: same held-out rows under the REAL "
+                         "production strategist system prompt (default OFF; additive)")
+    ap.add_argument("--exitmgr-dir", default=None, dest="exitmgr_dir",
+                    help="path to exitmgr-app (sources the live SYSTEM_PROMPT for --skew); "
+                         "defaults to $EXITMGR_DIR or ~/exitmgr-app")
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--move-max-tokens", type=int, default=160, dest="move_max_tokens",
                     help="max_tokens for held-out JSON answers")
@@ -655,7 +818,7 @@ def main():
     ap.add_argument("--verbose", action="store_true")
     # perplexity (held-out, optional local forward pass)
     ap.add_argument("--hf-base", default=None, help="path/name of base model weights (HF id or local dir) to enable token-loss/ppl")
-    ap.add_argument("--hf-ft", default=None, help="path to a LoRA/PEFT adapter dir for the fine-tuned model\'s ppl")
+    ap.add_argument("--hf-ft", default=None, help="path to a LoRA/PEFT adapter dir for the fine-tuned model's ppl")
     ap.add_argument("--ppl-n", type=int, default=100, dest="ppl_n", help="rows for perplexity forward pass")
     args = ap.parse_args()
 
@@ -669,6 +832,9 @@ def main():
     if args.mode in ("held-out", "all"):
         print("\n### TARGET 1: HELD-OUT TRADING SET")
         results["held-out"] = run_heldout(args.base_url, args.ft_url, args.n, args)
+        if args.skew:
+            print("\n### TARGET 1b: TRAIN/SERVE SKEW (held-out rows under PRODUCTION prompt)")
+            results["skew"] = run_skew(args.base_url, args.ft_url, args.n, args)
     if args.mode in ("trading-gauntlet", "all"):
         print("\n### TARGET 2: TRADING GAUNTLET")
         results["trading-gauntlet"] = run_gauntlet(args.base_url, args.ft_url, TRADING_BATTERIES, args, sysdefault)
