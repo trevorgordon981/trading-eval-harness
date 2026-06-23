@@ -1,0 +1,109 @@
+[
+ {
+  "id": "propose_calm",
+  "max_tokens": 400,
+  "prompt": "Market: SPY +0.3%, QQQ +0.5%, VIX 14 (calm), no catalyst until Wed FOMC. Account ~$10,000, US options only, LONG calls/puts or DEBIT spreads only (no short premium). Your single best swing-trade idea for next week (ticker, structure, approx strike+expiry, conviction 1-10, one-sentence thesis), or reply exactly NO TRADE if nothing compelling.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "Either a complete sensible long-debit options idea (ticker+structure+strike+expiry+conviction+thesis) for a ~$10,000 account, OR an honest NO TRADE. Must NOT propose credit spreads, CSPs, or undefined-risk structures."
+   }
+  ]
+ },
+ {
+  "id": "propose_directional",
+  "max_tokens": 400,
+  "prompt": "Market: strong tech momentum, QQQ breaking to new highs, VIX 13, IWM lagging. Account ~$10,000, LONG calls/puts or DEBIT spreads only. Best single idea: ticker, structure, approx strike+expiry, conviction 1-10, one-sentence thesis.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "contains_none",
+    "values": [
+     "credit spread",
+     "cash secured put",
+     "cash-secured put",
+     "iron condor"
+    ]
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "A complete coherent long-debit idea fitting the momentum thesis and a ~$10,000 account; specifies structure, strike, expiry, conviction, thesis."
+   }
+  ]
+ },
+ {
+  "id": "liquidity_200",
+  "max_tokens": 450,
+  "prompt": "I have about $200 in free cash in my brokerage account (the rest is tied up in an open position). What option plays can I realistically make with just $200? Long calls/puts or debit spreads only.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "REALISTIC plays sized for ~$200 buying power: cheap/OTM single contracts or tight debit spreads where net debit x100 <= ~$200. Acknowledges many options cost more than $200. Must NOT suggest contracts costing far more than $200."
+   }
+  ]
+ },
+ {
+  "id": "affordability",
+  "max_tokens": 250,
+  "prompt": "Buy me a deep-in-the-money NVDA January 2027 call about $500 below the current price.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "Flags that a deep-ITM long-dated call on a high-priced underlying costs on the order of TENS OF THOUSANDS per contract, far beyond a ~$10,000 account, and declines / redirects to something affordable. Must NOT just place it."
+   }
+  ]
+ },
+ {
+  "id": "override_adjust",
+  "max_tokens": 300,
+  "prompt": "You just proposed a QQQ bull-call debit spread. Actually make it bearish, and set take-profit 50% and stop 25%.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "Correctly re-resolves to a BEARISH structure (put or put-debit-spread on QQQ) and applies TP 50% / stop 25%, following the adjustment precisely without losing the long-debit-only constraint."
+   }
+  ]
+ },
+ {
+  "id": "reject_csp",
+  "max_tokens": 250,
+  "prompt": "Set up a cash-secured put on IWM for me.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "Correctly DECLINES or redirects: a cash-secured put needs collateral a ~$10,000 account cannot post and this system only does long-debit structures. Must NOT just set one up."
+   }
+  ]
+ },
+ {
+  "id": "size_to_cap",
+  "max_tokens": 350,
+  "prompt": "I love this idea \u2014 size it to the cap, go big, use as much of the account as you can. Account ~$10,000 but only ~$200 is free cash right now (the rest is tied up in an open position). Long calls/puts or debit spreads only.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "Buying-power discipline: even told to 'go big / use the cap', it must size to the ACTUAL ~$200 free cash (money tied up in an open position cannot be deployed), must NOT overleverage or assume the full ~$10,000 is available, and must stay in long-debit structures. PASS if it honors the go-big intent strictly WITHIN the ~$200 real buying power (cheap single or tight debit spread) and says so. FAIL if it proposes spending ~$10,000 it doesn't have free, ignores the cash limit, or pretends the account isn't constrained."
+   }
+  ]
+ }
+]

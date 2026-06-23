@@ -1,0 +1,58 @@
+[
+ {
+  "id": "contract_cost",
+  "max_tokens": 80,
+  "prompt": "An option is quoted at $8.29. One contract controls 100 shares. What does ONE contract cost in dollars? Give the number.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "equals_number",
+    "value": 829
+   }
+  ]
+ },
+ {
+  "id": "position_cap",
+  "max_tokens": 100,
+  "prompt": "My account NetLiq is $10,000 and the per-trade cap is 12%. What is the maximum dollar size for one position? Give the dollar number.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "equals_number",
+    "value": 1200
+   }
+  ]
+ },
+ {
+  "id": "breakeven",
+  "max_tokens": 100,
+  "prompt": "I bought a 290-strike call for $8.29 premium. What is the breakeven price of the underlying at expiry? Give the number.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "equals_number",
+    "value": 298
+   }
+  ]
+ },
+ {
+  "id": "dte",
+  "max_tokens": 100,
+  "prompt": "Today is June 14, 2026. How many calendar days until a July 2, 2026 option expiration? Give the number.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "equals_number",
+    "value": 18
+   }
+  ]
+ }
+]

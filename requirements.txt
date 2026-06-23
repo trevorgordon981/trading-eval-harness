@@ -1,0 +1,9 @@
+# Core: the endpoint eval path is standard-library only, but `requests` is handy
+# for any HTTP helper scripts you add.
+requests
+
+# Optional — only needed for the held-out token-loss / perplexity sub-metric
+# (the local forward-pass path enabled by --hf-base / --hf-ft):
+# torch
+# transformers
+# peft

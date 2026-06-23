@@ -1,0 +1,23 @@
+# Runtime eval outputs (NOT the batteries/*.json fixtures)
+/eval_*.json
+/eval_*.log
+eval_finetuned_results.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Envs / virtualenvs
+venv/
+.venv/
+.env
+
+# Model artifacts
+*.pt
+*.bin
+*.safetensors
+
+# Datasets (ship only the synthetic example in batteries/)
+/*.jsonl
+heldout_trading.jsonl

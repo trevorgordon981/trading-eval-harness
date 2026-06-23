@@ -1,0 +1,56 @@
+[
+ {
+  "id": "diverse_tickers",
+  "max_tokens": 400,
+  "prompt": "Suggest 10 US stocks or ETFs with liquid options for a short-term swing trade. EXCLUDE: semiconductors, leveraged single-stock names, sector-thematic ARK-style funds, biotech/pharma. Spread across at least 5 different sectors. Format: TICKER - one-line theme.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "contains_none",
+    "values": [
+     "ARKK",
+     "ARKG",
+     "ARKW",
+     "ARKQ",
+     "ARKF",
+     "ARKX"
+    ]
+   },
+   {
+    "type": "min_items",
+    "n": 8
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "~10 liquid optionable names, none semiconductor/ARK/biotech, genuinely spread across 5+ distinct sectors (not all tech)."
+   }
+  ]
+ },
+ {
+  "id": "discovery",
+  "max_tokens": 350,
+  "prompt": "Scout up to 3 NEW interesting options swing-trade candidates NOT already on my watchlist (AAPL, MSFT, NVDA, SPY, QQQ). Exclude ARK-style funds and biotech. One short reason each.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "contains_none",
+    "values": [
+     "ARKK",
+     "ARKG",
+     "ARKW",
+     "ARKQ",
+     "ARKF",
+     "ARKX"
+    ]
+   },
+   {
+    "type": "llm_judge",
+    "criteria": "Up to 3 liquid candidates NOT on the watchlist, none excluded, each with a plausible short-term catalyst."
+   }
+  ]
+ }
+]
