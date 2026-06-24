@@ -1,0 +1,72 @@
+{
+  "final_files": {
+    "decisions_gpt55_v5.jsonl": {
+      "rows": 1000,
+      "decision_counts": {
+        "NO TRADE": 434,
+        "SHORT": 200,
+        "BUY": 366
+      },
+      "finish_reasons": {
+        "stop": 1000
+      },
+      "errors": 0,
+      "empty_raw_response": 0,
+      "models": {
+        "gpt-5.5": 1000
+      }
+    },
+    "decisions_gpt54_v5.jsonl": {
+      "rows": 1000,
+      "decision_counts": {
+        "NO TRADE": 424,
+        "SHORT": 200,
+        "BUY": 376
+      },
+      "finish_reasons": {
+        "stop": 1000
+      },
+      "errors": 0,
+      "empty_raw_response": 0,
+      "models": {
+        "gpt-5.4": 1000
+      }
+    },
+    "decisions_gpt53_v5.jsonl": {
+      "rows": 1000,
+      "decision_counts": {
+        "NO TRADE": 460,
+        "SHORT": 200,
+        "BUY": 340
+      },
+      "finish_reasons": {
+        "stop": 1000
+      },
+      "errors": 0,
+      "empty_raw_response": 0,
+      "models": {
+        "gpt-5.3-chat-latest": 1000
+      }
+    }
+  },
+  "pre_repair_files": {
+    "pre_repair/decisions_gpt55_v5.jsonl": {
+      "rows": 1000,
+      "incomplete": 610,
+      "errors": 50,
+      "incomplete_finish_reasons": {
+        "length": 560,
+        "null": 50
+      }
+    },
+    "pre_repair/decisions_gpt53_v5.jsonl": {
+      "rows": 1000,
+      "incomplete": 152,
+      "errors": 23,
+      "incomplete_finish_reasons": {
+        "length": 129,
+        "null": 23
+      }
+    }
+  }
+}

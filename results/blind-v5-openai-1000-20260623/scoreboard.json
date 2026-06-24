@@ -1,0 +1,433 @@
+{
+  "run_dir": ".",
+  "n": 1000,
+  "quality": {
+    "gpt-5.5 + v5 prompt": {
+      "file": "decisions_gpt55_v5.jsonl",
+      "rows": 1000,
+      "incomplete": 0
+    },
+    "gpt-5.4 + v5 prompt": {
+      "file": "decisions_gpt54_v5.jsonl",
+      "rows": 1000,
+      "incomplete": 0
+    },
+    "gpt-5.3-chat-latest + v5 prompt": {
+      "file": "decisions_gpt53_v5.jsonl",
+      "rows": 1000,
+      "incomplete": 0
+    }
+  },
+  "board": [
+    {
+      "name": "Perfect hindsight",
+      "return_pct": 4926.17,
+      "trades": 998,
+      "correct": 998,
+      "wrong": 0,
+      "neutral": 2,
+      "directional_accuracy_pct": 100.0,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "BUY",
+          "return_pct": 0.32,
+          "pnl": 0.32
+        },
+        {
+          "case_id": "C0358",
+          "decision": "SHORT",
+          "return_pct": -11.91,
+          "pnl": 11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "SHORT",
+          "return_pct": -7.63,
+          "pnl": 7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "SHORT",
+          "return_pct": -1.88,
+          "pnl": 1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "BUY",
+          "return_pct": 0.52,
+          "pnl": 0.52
+        }
+      ]
+    },
+    {
+      "name": "Source-label oracle",
+      "return_pct": 3503.22,
+      "trades": 600,
+      "correct": 501,
+      "wrong": 99,
+      "neutral": 400,
+      "directional_accuracy_pct": 83.5,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "NO TRADE",
+          "return_pct": 0.32,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0358",
+          "decision": "SHORT",
+          "return_pct": -11.91,
+          "pnl": 11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "SHORT",
+          "return_pct": -7.63,
+          "pnl": 7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "BUY",
+          "return_pct": -1.88,
+          "pnl": -1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "NO TRADE",
+          "return_pct": 0.52,
+          "pnl": 0.0
+        }
+      ]
+    },
+    {
+      "name": "gpt-5.4 + v5 prompt",
+      "return_pct": 3359.84,
+      "trades": 576,
+      "correct": 479,
+      "wrong": 97,
+      "neutral": 424,
+      "directional_accuracy_pct": 83.16,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "NO TRADE",
+          "return_pct": 0.32,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0358",
+          "decision": "SHORT",
+          "return_pct": -11.91,
+          "pnl": 11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "SHORT",
+          "return_pct": -7.63,
+          "pnl": 7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "BUY",
+          "return_pct": -1.88,
+          "pnl": -1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "NO TRADE",
+          "return_pct": 0.52,
+          "pnl": 0.0
+        }
+      ]
+    },
+    {
+      "name": "gpt-5.5 + v5 prompt",
+      "return_pct": 3351.43,
+      "trades": 566,
+      "correct": 474,
+      "wrong": 92,
+      "neutral": 434,
+      "directional_accuracy_pct": 83.75,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "NO TRADE",
+          "return_pct": 0.32,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0358",
+          "decision": "SHORT",
+          "return_pct": -11.91,
+          "pnl": 11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "SHORT",
+          "return_pct": -7.63,
+          "pnl": 7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "BUY",
+          "return_pct": -1.88,
+          "pnl": -1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "NO TRADE",
+          "return_pct": 0.52,
+          "pnl": 0.0
+        }
+      ]
+    },
+    {
+      "name": "gpt-5.3-chat-latest + v5 prompt",
+      "return_pct": 3199.68,
+      "trades": 540,
+      "correct": 450,
+      "wrong": 90,
+      "neutral": 460,
+      "directional_accuracy_pct": 83.33,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "NO TRADE",
+          "return_pct": 0.32,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0358",
+          "decision": "SHORT",
+          "return_pct": -11.91,
+          "pnl": 11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "SHORT",
+          "return_pct": -7.63,
+          "pnl": 7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "BUY",
+          "return_pct": -1.88,
+          "pnl": -1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "NO TRADE",
+          "return_pct": 0.52,
+          "pnl": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Momentum",
+      "return_pct": 2893.15,
+      "trades": 833,
+      "correct": 585,
+      "wrong": 248,
+      "neutral": 167,
+      "directional_accuracy_pct": 70.23,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "NO TRADE",
+          "return_pct": 0.32,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0358",
+          "decision": "SHORT",
+          "return_pct": -11.91,
+          "pnl": 11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "SHORT",
+          "return_pct": -7.63,
+          "pnl": 7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "SHORT",
+          "return_pct": -1.88,
+          "pnl": 1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "SHORT",
+          "return_pct": 0.52,
+          "pnl": -0.52
+        }
+      ]
+    },
+    {
+      "name": "Always Short",
+      "return_pct": 546.81,
+      "trades": 1000,
+      "correct": 439,
+      "wrong": 561,
+      "neutral": 0,
+      "directional_accuracy_pct": 43.9,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "SHORT",
+          "return_pct": 0.32,
+          "pnl": -0.32
+        },
+        {
+          "case_id": "C0358",
+          "decision": "SHORT",
+          "return_pct": -11.91,
+          "pnl": 11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "SHORT",
+          "return_pct": -7.63,
+          "pnl": 7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "SHORT",
+          "return_pct": -1.88,
+          "pnl": 1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "SHORT",
+          "return_pct": 0.52,
+          "pnl": -0.52
+        }
+      ]
+    },
+    {
+      "name": "Always No Trade",
+      "return_pct": 0.0,
+      "trades": 0,
+      "correct": 0,
+      "wrong": 0,
+      "neutral": 1000,
+      "directional_accuracy_pct": null,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "NO TRADE",
+          "return_pct": 0.32,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0358",
+          "decision": "NO TRADE",
+          "return_pct": -11.91,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0558",
+          "decision": "NO TRADE",
+          "return_pct": -7.63,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0411",
+          "decision": "NO TRADE",
+          "return_pct": -1.88,
+          "pnl": 0.0
+        },
+        {
+          "case_id": "C0807",
+          "decision": "NO TRADE",
+          "return_pct": 0.52,
+          "pnl": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Seeded coin flip",
+      "return_pct": -63.57,
+      "trades": 1000,
+      "correct": 493,
+      "wrong": 507,
+      "neutral": 0,
+      "directional_accuracy_pct": 49.3,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "SHORT",
+          "return_pct": 0.32,
+          "pnl": -0.32
+        },
+        {
+          "case_id": "C0358",
+          "decision": "SHORT",
+          "return_pct": -11.91,
+          "pnl": 11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "BUY",
+          "return_pct": -7.63,
+          "pnl": -7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "BUY",
+          "return_pct": -1.88,
+          "pnl": -1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "BUY",
+          "return_pct": 0.52,
+          "pnl": 0.52
+        }
+      ]
+    },
+    {
+      "name": "Always Buy (brick)",
+      "return_pct": -546.81,
+      "trades": 1000,
+      "correct": 559,
+      "wrong": 441,
+      "neutral": 0,
+      "directional_accuracy_pct": 55.9,
+      "samples": [
+        {
+          "case_id": "C0350",
+          "decision": "BUY",
+          "return_pct": 0.32,
+          "pnl": 0.32
+        },
+        {
+          "case_id": "C0358",
+          "decision": "BUY",
+          "return_pct": -11.91,
+          "pnl": -11.91
+        },
+        {
+          "case_id": "C0558",
+          "decision": "BUY",
+          "return_pct": -7.63,
+          "pnl": -7.63
+        },
+        {
+          "case_id": "C0411",
+          "decision": "BUY",
+          "return_pct": -1.88,
+          "pnl": -1.88
+        },
+        {
+          "case_id": "C0807",
+          "decision": "BUY",
+          "return_pct": 0.52,
+          "pnl": 0.52
+        }
+      ]
+    }
+  ]
+}

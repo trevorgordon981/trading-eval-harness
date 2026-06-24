@@ -1,0 +1,21 @@
+{
+  "run_id": "blind-v5-openai-1000-20260623",
+  "created_at": "2026-06-23T06:17:39.485234Z",
+  "seed": 20260623,
+  "n": 1000,
+  "source": "../../batteries/heldout_example.jsonl",
+  "prompts": "prompts.jsonl",
+  "answer_key": "answer_key.jsonl",
+  "status": "generated",
+  "contamination_rule": "Runner must read prompts.jsonl only; answer_key.jsonl is for scoring after decisions are locked.",
+  "scoreboard": "scoreboard.json",
+  "decisions": {
+    "gpt-5.5 + v5 prompt": "decisions_gpt55_v5.jsonl",
+    "gpt-5.4 + v5 prompt": "decisions_gpt54_v5.jsonl",
+    "gpt-5.3-chat-latest + v5 prompt": "decisions_gpt53_v5.jsonl"
+  },
+  "pre_repair_decisions": {
+    "gpt-5.5 + v5 prompt": "pre_repair/decisions_gpt55_v5.jsonl",
+    "gpt-5.3-chat-latest + v5 prompt": "pre_repair/decisions_gpt53_v5.jsonl"
+  }
+}
