@@ -1,0 +1,97 @@
+{
+  "answer_key": "/Users/atomau/trading-eval-harness-github-run/decision_books/historical-1k-20260624/answer_key.jsonl",
+  "board": [
+    {
+      "correct": 666,
+      "directional_accuracy_pct": 66.8,
+      "name": "Perfect hindsight",
+      "neutral": 3,
+      "return_pct": 3360.91,
+      "trades": 997,
+      "wrong": 331
+    },
+    {
+      "correct": 666,
+      "directional_accuracy_pct": 100.0,
+      "name": "Label oracle",
+      "neutral": 334,
+      "return_pct": 3047.82,
+      "trades": 666,
+      "wrong": 0
+    },
+    {
+      "correct": 342,
+      "directional_accuracy_pct": 34.2,
+      "name": "Alternating Short/Buy",
+      "neutral": 0,
+      "return_pct": 198.85,
+      "trades": 1000,
+      "wrong": 658
+    },
+    {
+      "correct": 344,
+      "directional_accuracy_pct": 34.4,
+      "name": "Seeded coin flip",
+      "neutral": 0,
+      "return_pct": 161.55,
+      "trades": 1000,
+      "wrong": 656
+    },
+    {
+      "correct": 333,
+      "directional_accuracy_pct": 33.3,
+      "name": "Always Buy",
+      "neutral": 0,
+      "return_pct": 126.69,
+      "trades": 1000,
+      "wrong": 667
+    },
+    {
+      "correct": 271,
+      "directional_accuracy_pct": 34.88,
+      "name": "5-day momentum",
+      "neutral": 223,
+      "return_pct": 92.17,
+      "trades": 777,
+      "wrong": 506
+    },
+    {
+      "correct": 0,
+      "directional_accuracy_pct": null,
+      "name": "Always No Trade",
+      "neutral": 1000,
+      "return_pct": 0.0,
+      "trades": 0,
+      "wrong": 0
+    },
+    {
+      "correct": 246,
+      "directional_accuracy_pct": 31.66,
+      "name": "5-day mean reversion",
+      "neutral": 223,
+      "return_pct": -92.17,
+      "trades": 777,
+      "wrong": 531
+    },
+    {
+      "correct": 333,
+      "directional_accuracy_pct": 33.3,
+      "name": "Always Short",
+      "neutral": 0,
+      "return_pct": -126.69,
+      "trades": 1000,
+      "wrong": 667
+    },
+    {
+      "correct": 324,
+      "directional_accuracy_pct": 32.4,
+      "name": "Alternating Buy/Short",
+      "neutral": 0,
+      "return_pct": -198.85,
+      "trades": 1000,
+      "wrong": 676
+    }
+  ],
+  "n": 1000,
+  "quality": {}
+}

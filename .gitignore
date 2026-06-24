@@ -21,3 +21,7 @@ venv/
 # Datasets (ship only the synthetic example in batteries/)
 /*.jsonl
 heldout_trading.jsonl
+
+# Historical decision-book downloader caches
+**/_price_cache/
+**/_stooq_cache/
