@@ -40,6 +40,53 @@ See `batteries/heldout_example.jsonl` for a small **synthetic** example file in
 exactly this format (made-up tickers/numbers — supply your own real dataset via
 `--heldout` or `$HELDOUT_PATH`).
 
+
+## Eval methodology
+
+Beyond the scorers, this repo ships the machinery that decides whether an eval
+number is worth believing at all. Each module is stdlib-only and runs standalone.
+
+### `verify_holdout_disjoint.py` — contamination gate
+
+Proves the eval sets are **disjoint from the training data** before any number is
+trusted. Run it against a training directory; it reports overlapping item IDs and
+near-duplicate prompts, and writes the offending IDs out for exclusion. An eval on
+contaminated data measures memorisation, not capability — this is the check that
+tells you which one you're looking at.
+
+### `variance.py` — reliability and the promotion noise band
+
+Re-runs the same battery against the same endpoint N times and reports the spread.
+The output is a **noise band**: the score movement that is indistinguishable from
+run-to-run variance. Any "improvement" smaller than the band is not an improvement.
+Without this you will promote noise, repeatedly and with confidence.
+
+### `calibration_gate.py` — does stated conviction track correctness?
+
+A model that says "conviction 9" should be right more often than when it says
+"conviction 4". This bins predictions by the model's own stated confidence and
+measures accuracy per bin. Calibration is a **weights property** — it cannot be
+prompted in — so it is the one thing a fine-tune can buy that a better prompt
+cannot, and worth gating promotions on when downstream sizing depends on it.
+
+### `judge_blind.py` — identity-blind LLM judging
+
+An LLM judge that can see which model produced an answer will favour the one it
+recognises. These helpers strip model identity from everything the judge sees and
+shuffle presentation order, so the comparison measures the answer instead of the
+label on it.
+
+### `gauntlet_contract.py` — immutable run contracts
+
+Creates and verifies a signed contract for a run: which batteries, which endpoint,
+which prompts, hashed. The runner, evaluator and reporter all verify against it, so
+a result cannot silently drift from the protocol that produced it — and two runs
+are only comparable when their contracts match.
+
+Battery coverage is declared in `battery_manifest.json`; every name in a profile
+must exist in `batteries/`. Drop your own `<name>.json` in `batteries/` and add it
+to a profile to extend coverage.
+
 ## Held-out metrics
 
 For each model the harness reports:
