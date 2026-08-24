@@ -1,0 +1,537 @@
+{
+  "answer_key": "answer_key.jsonl",
+  "asset_aliases": {
+    "AAPL": "Asset 001",
+    "ABBV": "Asset 002",
+    "AMD": "Asset 003",
+    "AMZN": "Asset 004",
+    "BA": "Asset 005",
+    "BAC": "Asset 006",
+    "CAT": "Asset 007",
+    "COP": "Asset 008",
+    "COST": "Asset 009",
+    "CRM": "Asset 010",
+    "CVX": "Asset 011",
+    "DE": "Asset 012",
+    "DIS": "Asset 013",
+    "GE": "Asset 014",
+    "GLD": "Asset 015",
+    "GOOGL": "Asset 016",
+    "GS": "Asset 017",
+    "HD": "Asset 018",
+    "IBM": "Asset 019",
+    "INTC": "Asset 020",
+    "IWM": "Asset 021",
+    "JNJ": "Asset 022",
+    "JPM": "Asset 023",
+    "LLY": "Asset 024",
+    "MA": "Asset 025",
+    "MCD": "Asset 026",
+    "META": "Asset 027",
+    "MSFT": "Asset 028",
+    "NFLX": "Asset 029",
+    "NKE": "Asset 030",
+    "NVDA": "Asset 031",
+    "ORCL": "Asset 032",
+    "PFE": "Asset 033",
+    "QQQ": "Asset 034",
+    "SLB": "Asset 035",
+    "SLV": "Asset 036",
+    "SPY": "Asset 037",
+    "TLT": "Asset 038",
+    "TSLA": "Asset 039",
+    "UNH": "Asset 040",
+    "USO": "Asset 041",
+    "V": "Asset 042",
+    "WMT": "Asset 043",
+    "XLE": "Asset 044",
+    "XLF": "Asset 045",
+    "XLI": "Asset 046",
+    "XLK": "Asset 047",
+    "XLP": "Asset 048",
+    "XLY": "Asset 049",
+    "XOM": "Asset 050"
+  },
+  "created_at": "2026-06-24T07:08:16.515340Z",
+  "end": "2025-12-31",
+  "generation_rule": "Prompts contain only close-of-date features; answer key is hidden forward return over horizon.",
+  "horizon_trading_days": 5,
+  "label_counts": {
+    "BUY": 333,
+    "NO TRADE": 334,
+    "SHORT": 333
+  },
+  "label_threshold_pct": 2.0,
+  "n": 1000,
+  "name": "historical-1k",
+  "prompt_identity_policy": "Prompts anonymize ticker and date; answer key retains real ticker/date for audit.",
+  "prompts": "prompts.jsonl",
+  "seed": 20260624,
+  "selection_rule": "Deterministic outcome-balanced sample across historical candidates, with soft ticker/year caps.",
+  "source": "Yahoo Finance chart API daily OHLCV with adjusted close",
+  "sources": [
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "990245a3d73399f97586f57545dfe8e28ca483c780da8e606c3e3a06004dccb9",
+      "ticker": "AAPL",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "0868b23e6848aaf930071ebd3ca5169cc29868560b1e889d51ff038cf8123347",
+      "ticker": "MSFT",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/MSFT?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "97ba5505d7caaf3a81e0361c23fda738d871065c6509f14e3ab8ed79d511a51c",
+      "ticker": "NVDA",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/NVDA?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "88d800aea26473feff4d618248d3ad509be4a1ffe7ebbafd6172fc54a7c121db",
+      "ticker": "AMZN",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/AMZN?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "dd56081abeb1533defcb87969c88d02b8f430f6eee88fa67ce9dea3afa656b90",
+      "ticker": "META",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/META?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "a716d5fc8851af11ac2aa822d3a24aec71834e5a6f7fe0bb71cc0eb5950d8758",
+      "ticker": "GOOGL",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/GOOGL?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "37176f6e6fab657c3eeba6506edb7d8bfb3c4076669fdf86432f29feeb12be44",
+      "ticker": "TSLA",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/TSLA?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "d9edbedbaae50e571a210c0e2c6d5f848934306ee1c38783892652974f8fbaf6",
+      "ticker": "AMD",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/AMD?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "fb68c351662becf5be01d0418a6e65944c000d900416e8ee2b1fac10961dcb52",
+      "ticker": "INTC",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/INTC?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "b12cb408debe28a7f302392aaafe9f2aa2b31d778c090652fada90e46acb78ab",
+      "ticker": "NFLX",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/NFLX?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "2626a6d7aa914eb6632e2260e14ffa834d20e933b17ac041d1b6e5835d988d2c",
+      "ticker": "JPM",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/JPM?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "09b543691ace054f779445675ef08ad1656cce21fdb330ce8412cfb26df987f2",
+      "ticker": "BAC",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/BAC?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "2acf5828dc8fc7b3b26761dedc8539f38a3279551027644ddb6b273135c1bb8f",
+      "ticker": "GS",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/GS?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "53222b10c603e89bb2348e06948595c01088945fc86a8269b9a278e3b0f47216",
+      "ticker": "V",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/V?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "bc0294e3dbdfad68e72703144ff6b204be8f922872760b0542a338bfdb7da693",
+      "ticker": "MA",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/MA?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "7260af78513da2055d3423d2a4cc20827888c612935b5e14ea530d3310e8e8b6",
+      "ticker": "XOM",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/XOM?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "2da93c9e1e17c03ea227b39e73cd651199c03a755b462a8c45ddf4d549e23521",
+      "ticker": "CVX",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/CVX?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "1d8d789f01435fc02decf050a17f2297011f8cc26a8c6d16c199fcb3d4868798",
+      "ticker": "SLB",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/SLB?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "98efc81c0a6cd4dd1d5227f73eca8ad768d2dc7fd6a61750042ebe91cf57d48d",
+      "ticker": "COP",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/COP?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "b74be40be02476385827aaeffb801872ab1b60732bbf25d1a21ef50f0a6216ce",
+      "ticker": "UNH",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/UNH?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "e682679d3b0a2b24bbed6444d634e9fc02977d900bd392d2e464f8c55fd993ea",
+      "ticker": "JNJ",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/JNJ?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "d451a7d9b78b82f5eb7cf4309dd42b63c42b265b592343844ac82a674caa3ac4",
+      "ticker": "PFE",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/PFE?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "eb9f06e508de04c9eb5638186e983c6159069ef5b90686e3a59b4ebcbe3955a2",
+      "ticker": "ABBV",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/ABBV?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "8f44ecfe341f52265b790169da7dccc01d7268506ee3b6aa28a0c172e4613e74",
+      "ticker": "LLY",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/LLY?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "43d9013b954de67917e8dae03e9666efb6cb584966c02b89cbbe7d5688ac12e0",
+      "ticker": "WMT",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/WMT?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "ca5217058781ef345458f71a3da105d1919c4c195e0de5329dd875453c513ac8",
+      "ticker": "COST",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/COST?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "4267257252f41cd3e20006858ef90e3a15ac75a6cb9e1e435c35a51d9ba436fd",
+      "ticker": "HD",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/HD?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "200f883819636447f3ccb1c9e0181b415deac3d0e8cbe41fb6686d6641146cd6",
+      "ticker": "NKE",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/NKE?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "d366eaaa030f678e7ba9c9ee210ce631467d5b6162d53c5b1fe73560bc169142",
+      "ticker": "MCD",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/MCD?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "3a2e2de7fe30f76f20421db33fe5a151652c0a8f187fd5b6086cba5d33231df3",
+      "ticker": "CAT",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/CAT?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "931850762b0c12dd595c8039a064c7639da851f37647be57e1685e14516bafa4",
+      "ticker": "BA",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/BA?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "d416cf99d7d36fc5a665b7e74e8a646c6b063680224b4c03dd2e4ad63c7dba5c",
+      "ticker": "GE",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/GE?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "765d30fb9b37adcd41afa3c863c30afce24dcd907caeaaad47596ed9834feaba",
+      "ticker": "DE",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/DE?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "6d75ffaf2220a0e4c9f777bb03b80d181e8f2ea403344757deaff411aa319fd0",
+      "ticker": "DIS",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/DIS?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "b981328912d3b5c256ffe642b4195d97e0b9d46b90b954848f7d8236338cec6b",
+      "ticker": "CRM",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/CRM?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "3f87b877b6e2940d63acc2b32ab11936e65825a57abbbf116f99ff38aa653ad1",
+      "ticker": "ORCL",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/ORCL?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "16d94693f58d3f5be37684e06568ddd753b83750ee25b665347429a56432d38b",
+      "ticker": "IBM",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/IBM?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "5e68104643bbee266b7181cf60f3fd8ca6cfd33982c803c8c005003525e70bea",
+      "ticker": "SPY",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/SPY?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "16231856a998cdb36e5a067c7fb0a59cd9a55eff9d49bb77632a21be4d8681fb",
+      "ticker": "QQQ",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/QQQ?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "d2e9654aad60fb8939e998ce27ca32fd4ff26b64d1ad37fb7041289822a0cd3b",
+      "ticker": "IWM",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/IWM?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "d1cd30227514b2890878a4cff2ef3404eae4f2b42db558a949c13869ddef5a10",
+      "ticker": "XLF",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/XLF?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "3e990a0fdada96cb1973e6c6c3a2d4a2cd160547053132c4278924accad66fe0",
+      "ticker": "XLE",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/XLE?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "48485a9bf322f4aacb3f5ea67be2617cd1084749b109e298224a7c9ab5790f25",
+      "ticker": "XLK",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/XLK?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "edce61c980928fa4cd3e816e02a7c797e2d98b2b1756a9a7285923badfcffcfc",
+      "ticker": "XLI",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/XLI?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "6b05c7ede8585fe97638b67f483797e64581534cdab4d10621eaf9d48571f598",
+      "ticker": "XLY",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/XLY?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "d86dab3beed6437644d42c0af9b4057acd8ca6cca299d677accbf57fd075296b",
+      "ticker": "XLP",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/XLP?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "643818ecdc3dcb78a40e46d06976247fcf899bc48b828b80341e9127e114957c",
+      "ticker": "TLT",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/TLT?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "e24e4fe7fe8c049623410327a8e91a8f864ab4b8e9a9c8950a1d4ab98689afbb",
+      "ticker": "GLD",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/GLD?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "5ebf526d23b886c9bcc5a7e648c37032f92710cadd614d3bbaef0483998c90d9",
+      "ticker": "SLV",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/SLV?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    },
+    {
+      "first_date": "2018-01-02",
+      "last_date": "2025-12-31",
+      "rows": 2011,
+      "sha256": "8d8ce6fe7adbcce2d2c57da6ba92d1346df056b44218e2f7a25080444a12043a",
+      "ticker": "USO",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/USO?period1=1514764800&period2=1767225600&interval=1d&events=history&includeAdjustedClose=true"
+    }
+  ],
+  "start": "2018-01-01",
+  "ticker_counts": {
+    "AAPL": 23,
+    "ABBV": 20,
+    "AMD": 13,
+    "AMZN": 27,
+    "BA": 27,
+    "BAC": 19,
+    "CAT": 29,
+    "COP": 22,
+    "COST": 23,
+    "CRM": 28,
+    "CVX": 13,
+    "DE": 22,
+    "DIS": 18,
+    "GE": 21,
+    "GLD": 18,
+    "GOOGL": 28,
+    "GS": 33,
+    "HD": 19,
+    "IBM": 19,
+    "INTC": 22,
+    "IWM": 14,
+    "JNJ": 17,
+    "JPM": 17,
+    "LLY": 26,
+    "MA": 24,
+    "MCD": 21,
+    "META": 19,
+    "MSFT": 25,
+    "NFLX": 18,
+    "NKE": 10,
+    "NVDA": 19,
+    "ORCL": 14,
+    "PFE": 26,
+    "QQQ": 21,
+    "SLB": 20,
+    "SLV": 16,
+    "SPY": 15,
+    "TLT": 14,
+    "TSLA": 26,
+    "UNH": 17,
+    "USO": 20,
+    "V": 19,
+    "WMT": 16,
+    "XLE": 16,
+    "XLF": 17,
+    "XLI": 13,
+    "XLK": 21,
+    "XLP": 16,
+    "XLY": 13,
+    "XOM": 26
+  },
+  "year_counts": {
+    "2018": 103,
+    "2019": 113,
+    "2020": 126,
+    "2021": 136,
+    "2022": 115,
+    "2023": 134,
+    "2024": 135,
+    "2025": 138
+  }
+}
