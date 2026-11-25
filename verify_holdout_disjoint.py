@@ -17,8 +17,9 @@ CHECK 2 — 584-row held-out forecasting set (~/m3-mix/heldout_trading_clean.jso
     row must NOT appear among training rows. Any hit = forecasting anchor /
     calibration gate / theta-proxy setups are train-contaminated.
 
-Exit 0 = DISJOINT (both checks clean). Exit 1 = CONTAMINATED. 100% stdlib,
-read-only, loads no model.
+Exit 0 = DISJOINT / CLEAN (all checks clean). Exit 1 = CONTAMINATED.
+Exit 2 = INVALID_CORPUS / INVALID_BATTERY / INVALID_INPUT (fail-closed on
+missing or empty inputs). 100% stdlib, read-only, loads no model.
 
 USAGE
   python3 verify_holdout_disjoint.py --train-dir ~/glm-v4-data-ff
@@ -32,9 +33,10 @@ import os
 import sys
 import time
 
-GG_ROOT = os.path.dirname(os.path.abspath(__file__))
-if GG_ROOT not in sys.path:
-    sys.path.insert(0, GG_ROOT)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+GG_ROOT = os.path.expanduser(os.environ.get("GG_ROOT") or SCRIPT_DIR)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 HOME = os.path.expanduser("~")
 DEF_HOLDKEYS = os.path.join(HOME, "v4-corpus", "real_trades_TESTHOLDOUT.txt")
@@ -84,10 +86,8 @@ def _iter_battery_files():
 
 def _battery_prompts(path):
     """Yield (id, prompt_text) for every item/scenario in a battery file."""
-    try:
-        d = json.load(open(path))
-    except Exception:
-        return
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
     items = d
     if isinstance(d, dict):
         items = d.get("scenarios") or d.get("items") or []
@@ -101,21 +101,50 @@ def _battery_prompts(path):
         if not prompt:
             turns = it.get("turns") or []
             prompt = " ".join(x for x in turns if isinstance(x, str))
-        if pid is not None and prompt:
+        if pid is not None and prompt and _norm(prompt):
             yield str(pid), prompt
 
 
-def _corpus_user_hashes(spec):
-    """spec = a dir (uses train.jsonl+valid.jsonl) or a glob. Return set of _phash(user_msg)."""
-    files = []
+def _resolve_corpus_files(spec):
+    """Resolve a corpus dir, file path, or glob to existing regular files.
+
+    Raises FileNotFoundError if the path/dir/glob does not exist or matches no files.
+    """
     if os.path.isdir(spec):
-        files = [os.path.join(spec, n) for n in ("train.jsonl", "valid.jsonl")
-                 if os.path.exists(os.path.join(spec, n))]
-    else:
-        files = sorted(glob.glob(spec))
+        files = [
+            os.path.join(spec, n)
+            for n in ("train.jsonl", "valid.jsonl")
+            if os.path.isfile(os.path.join(spec, n))
+        ]
+        if not files:
+            raise FileNotFoundError(
+                "corpus directory contains neither train.jsonl nor valid.jsonl: %s" % spec
+            )
+        return files
+    if glob.has_magic(spec):
+        files = sorted(p for p in glob.glob(spec) if os.path.isfile(p))
+        if not files:
+            raise FileNotFoundError("corpus glob matched 0 files: %s" % spec)
+        return files
+    if not os.path.exists(spec):
+        raise FileNotFoundError("corpus path does not exist: %s" % spec)
+    if not os.path.isfile(spec):
+        raise FileNotFoundError("corpus path is not a readable file or directory: %s" % spec)
+    return [spec]
+
+
+def _corpus_user_hashes(spec):
+    """spec = a dir (uses train.jsonl+valid.jsonl), file, or glob.
+
+    Returns (hashes, files). Fails closed by raising FileNotFoundError or
+    ValueError if the corpus path is missing, matches zero files, or yields
+    zero non-empty user-message entries.
+    """
+    files = _resolve_corpus_files(spec)
     hashes = set()
+    records = 0
     for p in files:
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -124,37 +153,98 @@ def _corpus_user_hashes(spec):
                     r = json.loads(line)
                 except Exception:
                     continue
+                if not isinstance(r, dict):
+                    continue
+                records += 1
                 for m in r.get("messages", []):
-                    if m.get("role") == "user":
-                        hashes.add(_phash(m.get("content") or ""))
+                    if isinstance(m, dict) and m.get("role") == "user":
+                        content = _norm(m.get("content") or "")
+                        if content:
+                            hashes.add(_phash(content))
+    if records == 0 or not hashes:
+        raise ValueError(
+            "corpus yielded 0 user-message entries (%d JSON record(s) across %d file[s]): %s"
+            % (records, len(files), spec)
+        )
     return hashes, files
+
+
+def _corpus_label(spec, existing):
+    if os.path.isdir(spec):
+        base = os.path.basename(os.path.normpath(spec))
+    elif glob.has_magic(spec):
+        base = os.path.basename(os.path.dirname(spec)) or spec
+    else:
+        base = os.path.basename(os.path.dirname(spec)) or os.path.basename(spec) or spec
+    if base not in existing:
+        return base
+    alt = os.path.basename(spec)
+    if alt and alt not in existing:
+        return alt
+    idx = 2
+    while "%s#%d" % (base, idx) in existing:
+        idx += 1
+    return "%s#%d" % (base, idx)
 
 
 def cmd_battery_scan(args):
     corpora = args.corpus or DEF_CORPORA
     corpora = [os.path.expanduser(c) for c in corpora]
-    # build per-corpus user-message hash sets
+    if not corpora:
+        print("ERROR: no corpus paths specified", file=sys.stderr)
+        print("VERDICT: INVALID_CORPUS — no training corpora configured for scan.")
+        sys.exit(2)
+
+    # build per-corpus user-message hash sets (fail closed on any missing/empty corpus)
     corp_hashes = {}
     corp_files = {}
+    corpus_errors = []
     for c in corpora:
-        name = os.path.basename(os.path.normpath(c)) if os.path.isdir(c) \
-            else (os.path.basename(os.path.dirname(c)) or c)
-        h, files = _corpus_user_hashes(c)
+        name = _corpus_label(c, corp_hashes)
+        try:
+            h, files = _corpus_user_hashes(c)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            corpus_errors.append(str(exc))
+            print("ERROR: %s" % exc, file=sys.stderr)
+            continue
         corp_hashes[name] = h
         corp_files[name] = files
         print("corpus %-24s %6d unique user-msg hashes  (%d file[s])" % (name, len(h), len(files)))
+
+    total_corpus_files = sum(len(fs) for fs in corp_files.values())
     any_hashes = set().union(*corp_hashes.values()) if corp_hashes else set()
+    if corpus_errors or total_corpus_files == 0 or not any_hashes:
+        print(
+            "VERDICT: INVALID_CORPUS — contamination gate failed closed "
+            "(%d corpus error(s), %d file[s], %d unique user-msg hash(es))."
+            % (len(corpus_errors), total_corpus_files, len(any_hashes))
+        )
+        sys.exit(2)
+
+    battery_files = list(_iter_battery_files())
+    if not battery_files:
+        print("ERROR: no battery files found under %s" % GG_ROOT, file=sys.stderr)
+        print("VERDICT: INVALID_BATTERY — contamination gate failed closed (0 battery files found).")
+        sys.exit(2)
 
     contaminated = {}        # battery_rel -> [ids]
     counts = {}              # battery_rel -> {corpus: n, "any": n}
     contam_phashes = set()   # normalized-prompt sha1 of every contaminated prompt
+    battery_errors = []
     total_prompts = 0
     total_contam = 0
-    for bf in _iter_battery_files():
+    for bf in battery_files:
         rel = os.path.relpath(bf, GG_ROOT)
         ids_hit = []
         per_corp = {name: 0 for name in corp_hashes}
-        for pid, prompt in _battery_prompts(bf):
+        try:
+            prompts = list(_battery_prompts(bf))
+        except Exception as exc:
+            msg = "failed to parse battery file %s: %s" % (bf, exc)
+            battery_errors.append(msg)
+            print("ERROR: %s" % msg, file=sys.stderr)
+            continue
+        for pid, prompt in prompts:
             total_prompts += 1
             ph = _phash(prompt)
             hit_any = False
@@ -171,19 +261,36 @@ def cmd_battery_scan(args):
             total_contam += len(ids_hit)
             print("  CONTAMINATED %-46s %3d prompt(s)  %s" % (rel, len(ids_hit), counts[rel]))
 
+    if battery_errors or total_prompts == 0:
+        print(
+            "ERROR: battery scan invalid (%d prompt(s) scanned, %d parse error(s))"
+            % (total_prompts, len(battery_errors)),
+            file=sys.stderr,
+        )
+        print(
+            "VERDICT: INVALID_BATTERY — contamination gate failed closed "
+            "(%d prompt(s), %d error(s))." % (total_prompts, len(battery_errors))
+        )
+        sys.exit(2)
+
     out = {
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "verdict": "CONTAMINATED" if total_contam else "CLEAN",
         "match_rule": "normalized-whitespace exact prompt vs any training user message (sha1)",
+        "scanned_corpus_files": total_corpus_files,
+        "scanned_corpus_hashes": len(any_hashes),
+        "scanned_prompts": total_prompts,
         "corpora": {name: corp_files[name] for name in corp_files},
         "counts": counts,
         "contaminated": contaminated,
         "contaminated_prompt_sha1": sorted(contam_phashes),
     }
     outpath = args.out or os.path.join(GG_ROOT, "results", "contaminated_ids.json")
-    os.makedirs(os.path.dirname(outpath), exist_ok=True)
-    json.dump(out, open(outpath, "w"), indent=1)
+    os.makedirs(os.path.dirname(os.path.abspath(outpath)), exist_ok=True)
+    with open(outpath, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=1)
     print("\nscanned %d battery prompts across %d file[s]; %d contaminated -> %s"
-          % (total_prompts, len(list(_iter_battery_files())), total_contam, outpath))
+          % (total_prompts, len(battery_files), total_contam, outpath))
     # reproduce the headline 314-battery numbers explicitly
     for rel, c in sorted(counts.items()):
         if "trading_gauntlet_314" in rel:
@@ -233,28 +340,62 @@ def main():
 
     if not args.train_dir:
         ap.error("--train-dir is required (holdout-key mode), or use --battery-scan")
-    from eval_v4 import trade_key  # the SAME key fn the builders excluded by (lazy: heavy import)
-    globals()["trade_key"] = trade_key
+
     tdir = os.path.expanduser(args.train_dir)
+    if not os.path.isdir(tdir):
+        print("ERROR: training dir does not exist: %s" % tdir, file=sys.stderr)
+        print("VERDICT: INVALID_CORPUS — training directory missing (%s)." % tdir)
+        sys.exit(2)
     files = [os.path.join(tdir, n) for n in ("train.jsonl", "valid.jsonl")
-             if os.path.exists(os.path.join(tdir, n))]
+             if os.path.isfile(os.path.join(tdir, n))]
     if not files:
         print("ERROR: no train.jsonl/valid.jsonl in %s" % tdir, file=sys.stderr)
+        print("VERDICT: INVALID_CORPUS — no train.jsonl or valid.jsonl in %s." % tdir)
         sys.exit(2)
 
     train_rows = []
     for p in files:
         rs = load_jsonl(p)
         print("loaded %-60s %6d rows (mtime %s)" % (
-            p, len(rs), __import__("time").strftime(
-                "%Y-%m-%d %H:%M", __import__("time").localtime(os.path.getmtime(p)))))
+            p, len(rs), time.strftime(
+                "%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))))
         train_rows += rs
+    if not train_rows:
+        print("ERROR: training corpus has 0 rows across %d file[s] in %s" % (len(files), tdir),
+              file=sys.stderr)
+        print("VERDICT: INVALID_CORPUS — training corpus is empty (%s)." % tdir)
+        sys.exit(2)
+
+    holdkeys_path = os.path.expanduser(args.holdout_keys)
+    if not os.path.isfile(holdkeys_path):
+        print("ERROR: holdout keys file does not exist: %s" % holdkeys_path, file=sys.stderr)
+        print("VERDICT: INVALID_INPUT — holdout keys file missing (%s)." % holdkeys_path)
+        sys.exit(2)
+    with open(holdkeys_path, encoding="utf-8") as f:
+        holdkeys = set(l.strip() for l in f if l.strip())
+    if not holdkeys:
+        print("ERROR: holdout keys file is empty: %s" % holdkeys_path, file=sys.stderr)
+        print("VERDICT: INVALID_INPUT — holdout keys file is empty (%s)." % holdkeys_path)
+        sys.exit(2)
+
+    heldout_path = os.path.expanduser(args.heldout)
+    if not os.path.isfile(heldout_path):
+        print("ERROR: held-out file does not exist: %s" % heldout_path, file=sys.stderr)
+        print("VERDICT: INVALID_INPUT — held-out set missing (%s)." % heldout_path)
+        sys.exit(2)
+    held = load_jsonl(heldout_path)
+    if not held:
+        print("ERROR: held-out file has 0 rows: %s" % heldout_path, file=sys.stderr)
+        print("VERDICT: INVALID_INPUT — held-out set is empty (%s)." % heldout_path)
+        sys.exit(2)
+
+    if "trade_key" not in globals():
+        from eval_v4 import trade_key  # the SAME key fn the builders excluded by (lazy: heavy import)
+        globals()["trade_key"] = trade_key
 
     bad = 0
 
     # ---- CHECK 1: TESTHOLDOUT trade-keys absent from training rows ----------
-    holdkeys = set(l.strip() for l in open(os.path.expanduser(args.holdout_keys))
-                   if l.strip())
     hits = []
     for r in train_rows:
         try:
@@ -272,13 +413,22 @@ def main():
         print("  DISJOINT")
 
     # ---- CHECK 2: 584 held-out rows absent from training rows ---------------
-    train_user = {_h(_msg(r, "user")) for r in train_rows}
+    train_user = {_h(_msg(r, "user")) for r in train_rows if _msg(r, "user").strip()}
     train_pair = {_h(_msg(r, "user") + "\x00" + _msg(r, "assistant"))
-                  for r in train_rows}
-    held = load_jsonl(os.path.expanduser(args.heldout))
-    u_hits = sum(1 for r in held if _h(_msg(r, "user")) in train_user)
-    p_hits = sum(1 for r in held if _h(_msg(r, "user") + "\x00" +
-                                       _msg(r, "assistant")) in train_pair)
+                  for r in train_rows if _msg(r, "user").strip()}
+    if not train_user:
+        print("ERROR: training corpus has 0 non-empty user messages in %s" % tdir, file=sys.stderr)
+        print("VERDICT: INVALID_CORPUS — training corpus has no user messages.")
+        sys.exit(2)
+    held_with_user = [r for r in held if _msg(r, "user").strip()]
+    if not held_with_user:
+        print("ERROR: held-out file has 0 non-empty user messages: %s" % heldout_path,
+              file=sys.stderr)
+        print("VERDICT: INVALID_INPUT — held-out set has no user messages.")
+        sys.exit(2)
+    u_hits = sum(1 for r in held_with_user if _h(_msg(r, "user")) in train_user)
+    p_hits = sum(1 for r in held_with_user if _h(_msg(r, "user") + "\x00" +
+                                                 _msg(r, "assistant")) in train_pair)
     print("\nCHECK 2  held-out forecasting set: %d rows vs %d training rows"
           % (len(held), len(train_rows)))
     print("  exact user-message overlaps:            %d" % u_hits)
