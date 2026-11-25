@@ -30,6 +30,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -59,6 +60,34 @@ def _norm(s):
 
 def _phash(s):
     return hashlib.sha1(_norm(s).encode("utf-8", "replace")).hexdigest()
+
+
+# Canonical real-trade setup pattern & key function (identical to eval_v4.trade_key,
+# self-contained here so verify_holdout_disjoint.py works in clean installs with zero
+# external/unpublished module dependencies).
+_RA = re.compile(
+    r"Setup:\s*(?P<ticker>[A-Z][A-Z0-9.]*)\s+(?P<otype>CALL|PUT)\s+\$?(?P<strike>[0-9.]+)"
+    r".*?~?(?P<dte>[0-9]+)\s*DTE"
+    r".*?~?(?P<contracts>[0-9]+)\s*at\s*\$(?P<entry>[0-9.]+)"
+    r".*?closed at\s*\$(?P<exit>[0-9.]+)\s*after\s*(?P<hold>[0-9]+)\s*day",
+    re.S,
+)
+
+
+def trade_key(row):
+    """Stable key for a real trade — deterministic across runs & orderings."""
+    m = row.get("meta") or {}
+    u = row["messages"][1]["content"]
+    setup = _RA.search(u)
+    tail = setup.group(0)[:80] if setup else u[:80]
+    raw = "|".join(str(x) for x in (
+        m.get("ticker"),
+        m.get("year"),
+        m.get("structure_type"),
+        m.get("outcome_pnl"),
+        tail,
+    ))
+    return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
 # ------------------------------------------------------------------------------
@@ -389,9 +418,6 @@ def main():
         print("VERDICT: INVALID_INPUT — held-out set is empty (%s)." % heldout_path)
         sys.exit(2)
 
-    if "trade_key" not in globals():
-        from eval_v4 import trade_key  # the SAME key fn the builders excluded by (lazy: heavy import)
-        globals()["trade_key"] = trade_key
 
     bad = 0
 

@@ -247,5 +247,147 @@ class TestVerifyHoldoutDisjointTrainDirMode(unittest.TestCase):
         self.assertNotIn("DISJOINT", proc2.stdout)
 
 
+    def test_valid_nonempty_disjoint_holdout_passes_clean_without_eval_v4(self):
+        """Clean-install replay: valid nonempty files must pass with zero eval_v4 dependency."""
+        tdir = os.path.join(self.tmp.name, "valid_train_clean")
+        _write_jsonl(
+            os.path.join(tdir, "train.jsonl"),
+            [
+                {
+                    "meta": {
+                        "ticker": "NVDA",
+                        "year": 2025,
+                        "structure_type": "long_call",
+                        "outcome_pnl": 1250.5,
+                    },
+                    "messages": [
+                        {"role": "system", "content": "sys"},
+                        {
+                            "role": "user",
+                            "content": "[2025 -- AI | Roth] Setup: NVDA CALL $140, exp 2025-06-20 (~45 DTE at entry). You bought-to-open ~2 at $5.50, closed at $11.75 after 12 days.",
+                        },
+                        {"role": "assistant", "content": "{}"},
+                    ],
+                }
+            ],
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = ""
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                SCRIPT,
+                "--train-dir",
+                tdir,
+                "--holdout-keys",
+                self.holdout_keys,
+                "--heldout",
+                self.heldout,
+            ],
+            cwd=self.tmp.name,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertNotIn("ModuleNotFoundError", proc.stderr)
+        self.assertIn("VERDICT: DISJOINT", proc.stdout)
+
+    def test_valid_nonempty_trade_key_contamination_fails_closed(self):
+        """Real-trade row whose canonical trade_key is in holdout_keys must exit 1 CONTAMINATED."""
+        tdir = os.path.join(self.tmp.name, "contaminated_train")
+        row = {
+            "meta": {
+                "ticker": "NVDA",
+                "year": 2025,
+                "structure_type": "long_call",
+                "outcome_pnl": 1250.5,
+            },
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {
+                    "role": "user",
+                    "content": "[2025 -- AI | Roth] Setup: NVDA CALL $140, exp 2025-06-20 (~45 DTE at entry). You bought-to-open ~2 at $5.50, closed at $11.75 after 12 days.",
+                },
+                {"role": "assistant", "content": "{}"},
+            ],
+        }
+        _write_jsonl(os.path.join(tdir, "train.jsonl"), [row])
+        hold_keys = os.path.join(self.tmp.name, "matching_holdout_keys.txt")
+        with open(hold_keys, "w", encoding="utf-8") as f:
+            f.write("cb0cd8dfd10014b3\n")
+        proc = _run_gate(
+            ["--train-dir", tdir, "--holdout-keys", hold_keys, "--heldout", self.heldout]
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertIn("CONTAMINATED — held-back trades present in training", proc.stdout)
+        self.assertIn("VERDICT: CONTAMINATED", proc.stdout)
+
+    def test_valid_nonempty_user_overlap_contamination_fails_closed(self):
+        """Exact held-out user-message overlap in train.jsonl must exit 1 CONTAMINATED."""
+        tdir = os.path.join(self.tmp.name, "user_overlap_train")
+        _write_jsonl(
+            os.path.join(tdir, "train.jsonl"),
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "Heldout setup"},
+                        {"role": "assistant", "content": "{}"},
+                    ]
+                }
+            ],
+        )
+        proc = _run_gate(
+            ["--train-dir", tdir, "--holdout-keys", self.holdout_keys, "--heldout", self.heldout]
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertIn("exact user-message overlaps:            1", proc.stdout)
+        self.assertIn("VERDICT: CONTAMINATED", proc.stdout)
+
+    def test_trade_key_matches_canonical_eval_v4_vectors(self):
+        """Verify self-contained trade_key matches canonical eval_v4.trade_key hashes."""
+        sys.path.insert(0, REPO_ROOT)
+        try:
+            import verify_holdout_disjoint as vhd
+        finally:
+            if REPO_ROOT in sys.path:
+                sys.path.remove(REPO_ROOT)
+
+        row1 = {
+            "meta": {
+                "ticker": "NVDA",
+                "year": 2025,
+                "structure_type": "long_call",
+                "outcome_pnl": 1250.5,
+            },
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {
+                    "role": "user",
+                    "content": "[2025 -- AI | Roth] Setup: NVDA CALL $140, exp 2025-06-20 (~45 DTE at entry). You bought-to-open ~2 at $5.50, closed at $11.75 after 12 days.",
+                },
+                {"role": "assistant", "content": "{}"},
+            ],
+        }
+        row2 = {
+            "meta": {
+                "ticker": "AAPL",
+                "year": 2025,
+                "structure_type": "call_debit_spread",
+                "outcome_pnl": -300,
+            },
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {
+                    "role": "user",
+                    "content": "Generic non-matching setup prompt text for fallback branch test",
+                },
+                {"role": "assistant", "content": "{}"},
+            ],
+        }
+        self.assertEqual(vhd.trade_key(row1), "cb0cd8dfd10014b3")
+        self.assertEqual(vhd.trade_key(row2), "2ef4a28fd1dc0481")
+
 if __name__ == "__main__":
     unittest.main()
