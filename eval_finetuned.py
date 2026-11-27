@@ -83,7 +83,17 @@ def _find_gg_root():
 GG_ROOT = _find_gg_root()
 BATT_DIR = os.path.join(GG_ROOT, "batteries")
 DEFAULT_TRADING_BATTERIES = ["tickers", "trademath", "trader"]
-FAILURE_REASONS = ("http_error", "timeout", "empty", "refusal", "parse_error")
+FAILURE_REASONS = (
+    "http_error",
+    "timeout",
+    "empty",
+    "refusal",
+    "truncated",
+    "parse_error",
+    "schema_error",
+)
+ALLOWED_JSON_FINISH_REASONS = ("stop", None)
+ALLOWED_TEXT_FINISH_REASONS = ("stop", "tool_calls", None)
 
 
 def load_manifest_profiles(root=None):
@@ -216,12 +226,17 @@ def is_refusal(text):
 
 
 def classify_failure(text, tool_calls, err, finish_reason, *, parsed=True,
-                     require_json=False, allow_refusal=False):
+                     schema_valid=True, require_json=False, allow_refusal=False):
     """Return None if response succeeded, else a canonical failure reason string."""
     if err:
         return _err_kind(err)
     if finish_reason in ("error", "content_filter"):
         return "http_error"
+    if finish_reason == "length":
+        return "truncated"
+    allowed_fr = ALLOWED_JSON_FINISH_REASONS if require_json else ALLOWED_TEXT_FINISH_REASONS
+    if finish_reason not in allowed_fr:
+        return "parse_error" if require_json else "http_error"
     has_text = bool((text or "").strip())
     has_tools = bool(_extract_tool_names(tool_calls))
     if not has_text and not has_tools:
@@ -230,6 +245,8 @@ def classify_failure(text, tool_calls, err, finish_reason, *, parsed=True,
         return "refusal"
     if require_json and not parsed:
         return "parse_error"
+    if require_json and not schema_valid:
+        return "schema_error"
     return None
 
 
@@ -341,6 +358,9 @@ def extract_json(text):
 
 
 MOVE_CATS = {"QUIET", "NORMAL", "ELEVATED", "EXPLOSIVE"}
+DIR_CATS = {"UP", "DOWN", "NEUTRAL"}
+VOL_CHANGE_CATS = {"EXPANDING", "STABLE", "CONTRACTING"}
+VS_IV_CATS = {"RICH", "FAIR", "CHEAP"}
 
 
 def norm_move(v):
@@ -387,9 +407,60 @@ def to_float(v):
     if v is None or isinstance(v, bool):
         return None
     try:
-        return float(re.sub(r"[^0-9.\-]", "", str(v)))
+        val = float(re.sub(r"[^0-9.\-]", "", str(v)))
+        return val if math.isfinite(val) else None
     except Exception:
         return None
+
+
+def validate_heldout_forecast(pred):
+    """Strictly validate the 6-field held-out trading forecast JSON schema.
+
+    Returns (is_valid: bool, errors: list[str]).
+    Empty objects, missing required fields, wrong JSON types (e.g. bool/list/dict),
+    non-finite values, or out-of-domain categories fail closed.
+    """
+    if not isinstance(pred, dict):
+        return False, ["response is not a JSON object"]
+    errors = []
+
+    raw_move = pred.get("move")
+    if not isinstance(raw_move, str) or not raw_move.strip():
+        errors.append("missing or non-string field: move")
+    elif norm_move(raw_move) not in MOVE_CATS:
+        errors.append("invalid move category: %r" % (raw_move,))
+
+    raw_call = pred.get("call")
+    if not isinstance(raw_call, str) or not raw_call.strip():
+        errors.append("missing or non-string field: call")
+    elif norm_dir(raw_call) not in DIR_CATS:
+        errors.append("invalid call direction: %r" % (raw_call,))
+
+    raw_vol = pred.get("vol_change")
+    if not isinstance(raw_vol, str) or not raw_vol.strip():
+        errors.append("missing or non-string field: vol_change")
+    elif norm_cat(raw_vol) not in VOL_CHANGE_CATS:
+        errors.append("invalid vol_change category: %r" % (raw_vol,))
+
+    raw_vsiv = pred.get("vs_iv")
+    if not isinstance(raw_vsiv, str) or not raw_vsiv.strip():
+        errors.append("missing or non-string field: vs_iv")
+    elif norm_cat(raw_vsiv) not in VS_IV_CATS:
+        errors.append("invalid vs_iv category: %r" % (raw_vsiv,))
+
+    raw_emp = pred.get("exp_move_pct")
+    if isinstance(raw_emp, bool) or not isinstance(raw_emp, (int, float)):
+        errors.append("missing or non-numeric field: exp_move_pct")
+    elif not math.isfinite(float(raw_emp)) or float(raw_emp) < 0.0:
+        errors.append("invalid exp_move_pct value: %r" % (raw_emp,))
+
+    raw_conv = pred.get("conviction")
+    if isinstance(raw_conv, bool) or not isinstance(raw_conv, (int, float)):
+        errors.append("missing or non-numeric field: conviction")
+    elif not math.isfinite(float(raw_conv)) or not (0.0 <= float(raw_conv) <= 10.0):
+        errors.append("invalid conviction value: %r" % (raw_conv,))
+
+    return (len(errors) == 0), errors
 
 
 def _is_base_only(base_url, ft_url, args=None):
@@ -441,25 +512,36 @@ def _compute_paired_heldout_ci(base_rows, ft_rows):
     return paired
 
 
+def _canonical_sha256(obj):
+    payload = (json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
 # ----------------------------------------------------------------------------- TARGET 1: held-out
-def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held-out"):
+def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held-out",
+                model_by_side=None):
     """Score the held-out 5-field vol set.
 
     Every attempted scenario is persisted as a terminal row. Headline accuracy
-    metrics use the FULL eligible attempted denominator (unparsed/failed/refused
-    rows count as incorrect). Conditional parsed-only metrics and full failure
-    coverage census are reported separately alongside all-case scores.
+    metrics use the FULL eligible attempted denominator (unparsed/schema-failed/
+    truncated/failed/refused rows count as incorrect). Strict valid-forecast
+    coverage requires an allowed terminal status and all typed schema fields;
+    loose JSON object parse count is reported separately as a diagnostic.
     """
     path = args.heldout
     if not os.path.exists(path):
         print("  [%s] SKIP — %s not found (training not finished yet?)" % (label_tag, path))
         return None
+    real_path = os.path.realpath(path)
+    with open(real_path, "rb") as f:
+        raw_bytes = f.read()
+    pre_sha256 = hashlib.sha256(raw_bytes).hexdigest()
     rows = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
+    for line in raw_bytes.decode("utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
     if not rows:
         print("  [%s] SKIP — file empty" % label_tag)
         return None
@@ -476,11 +558,11 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
 
     out = {}
     for label, url in sides:
-        model = detect_model(url) or label
+        model = (model_by_side or {}).get(label) or detect_model(url) or label
         moves_ok = dir_ok = vol_ok = vsiv_ok = 0
         move_elig = dir_elig = vol_elig = vsiv_elig = mae_elig = 0
         parsed_move_elig = parsed_dir_elig = parsed_vol_elig = parsed_vsiv_elig = 0
-        parsed = total = 0
+        parsed = json_parsed_count = total = 0
         census = new_failure_census()
         calib = []
         preds = []
@@ -498,6 +580,7 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
                 system = system_override
             mm = ([{"role": "system", "content": system}] if system else []) + \
                  [{"role": "user", "content": user}]
+            prompt_sha256 = _canonical_sha256({"case_id": case_id, "messages": mm})
             txt, ctok, finish_reason, tcalls, err = chat_text(
                 url, mm, max_tokens=args.move_max_tokens,
                 temperature=0.0, model=model, timeout=args.timeout,
@@ -505,17 +588,33 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
             total += 1
             census["attempted"] += 1
 
-            # Fail closed on transport/HTTP error, content_filter, empty, or refusal
-            pre_fail = classify_failure(
-                txt, tcalls, err, finish_reason, parsed=True, require_json=False
+            # Loose JSON object parse diagnostic (tracked separately from strict valid coverage)
+            raw_pred = (
+                extract_json(txt)
+                if (not err and finish_reason not in ("error", "content_filter"))
+                else None
             )
-            pred = None if pre_fail is not None else extract_json(txt)
-            is_parsed = isinstance(pred, dict)
-            fail_reason = pre_fail if pre_fail is not None else (
-                None if is_parsed else "parse_error"
+            is_json_parsed = isinstance(raw_pred, dict)
+            if is_json_parsed:
+                json_parsed_count += 1
+            is_schema_valid, schema_errors = (
+                validate_heldout_forecast(raw_pred)
+                if is_json_parsed
+                else (False, ["no JSON object parsed"])
             )
-            status = "ok" if fail_reason is None else fail_reason
-            if fail_reason is None:
+
+            # Fail closed on transport/HTTP error, content_filter, truncation (length),
+            # disallowed finish_reason, empty, refusal, JSON parse failure, or schema error.
+            fail_reason = classify_failure(
+                txt, tcalls, err, finish_reason,
+                parsed=is_json_parsed,
+                schema_valid=is_schema_valid,
+                require_json=True,
+            )
+            is_valid = (fail_reason is None)
+            pred = raw_pred if is_valid else None
+            status = "ok" if is_valid else fail_reason
+            if is_valid:
                 census["succeeded"] += 1
                 parsed += 1
             else:
@@ -547,7 +646,7 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
             call_hit = False
             vol_hit = False
             vsiv_hit = False
-            if is_parsed:
+            if is_valid:
                 if is_move_elig:
                     parsed_move_elig += 1
                     if norm_move(pred.get("move")) == gt_move:
@@ -578,12 +677,17 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
             preds.append({
                 "case_id": case_id,
                 "status": status,
-                "parsed": is_parsed,
+                "parsed": is_valid,
+                "schema_valid": is_schema_valid,
+                "json_parsed": is_json_parsed,
+                "schema_errors": schema_errors,
+                "model": model,
+                "prompt_sha256": prompt_sha256,
                 "err": err,
                 "finish_reason": finish_reason,
                 "completion_tokens": ctok,
                 "pred": ({k: pred.get(k) for k in ("move", "call", "vol_change", "vs_iv", "exp_move_pct", "conviction")}
-                         if is_parsed else None),
+                         if is_valid else None),
                 "gt": {k: gt.get(k) for k in ("move", "call", "vol_change", "vs_iv", "exp_move_pct", "conviction")},
                 "correct": {
                     "move": move_hit if is_move_elig else None,
@@ -593,7 +697,7 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
                 },
             })
             if (i + 1) % 50 == 0:
-                print("    [%s] %d/%d  parse=%.0f%% move(all)=%.0f%%" % (
+                print("    [%s] %d/%d  valid=%.0f%% move(all)=%.0f%%" % (
                     label, i + 1, len(rows), 100 * parsed / total,
                     100 * moves_ok / max(1, move_elig)))
 
@@ -616,16 +720,23 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
         vol_acc_all = (vol_ok / vol_elig) if vol_elig else 0.0
         vsiv_acc_all = (vsiv_ok / vsiv_elig) if vsiv_elig else 0.0
 
-        # Conditional parsed-only metrics (separately labeled; never used for ranking)
+        # Conditional valid-only metrics (separately labeled; never used for ranking)
         move_acc_parsed = (moves_ok / parsed_move_elig) if parsed_move_elig else None
         dir_acc_parsed = (dir_ok / parsed_dir_elig) if parsed_dir_elig else None
         vol_acc_parsed = (vol_ok / parsed_vol_elig) if parsed_vol_elig else None
         vsiv_acc_parsed = (vsiv_ok / parsed_vsiv_elig) if parsed_vsiv_elig else None
 
+        valid_cov = parsed / total if total else 0.0
+        loose_json_rate = json_parsed_count / total if total else 0.0
+
         out[label] = {
             "n": total,
             "parsed": parsed,
-            "parse_rate": parsed / total if total else 0.0,
+            "parse_rate": valid_cov,
+            "valid_count": parsed,
+            "valid_coverage": valid_cov,
+            "json_parsed": json_parsed_count,
+            "json_parse_rate": loose_json_rate,
             "move_acc": move_acc_all,
             "dir_acc": dir_acc_all,
             "vol_change_acc": vol_acc_all,
@@ -646,12 +757,14 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
             "rows": preds,
             "secs": round(secs, 1),
             "model": model,
+            "heldout_sha256": pre_sha256,
         }
 
         print(
-            "  [%s:%s] coverage=%d/%d (%.1f%%) move_acc(all)=%.1f%% [parsed=%s] "
+            "  [%s:%s] valid_cov=%d/%d (%.1f%%) [json_parsed=%d/%d] move_acc(all)=%.1f%% [valid=%s] "
             "dir_acc(all)=%.1f%% mae=%s (%.0fs)" % (
-                label_tag, label, parsed, total, 100 * out[label]["parse_rate"],
+                label_tag, label, parsed, total, 100 * valid_cov,
+                json_parsed_count, total,
                 100 * move_acc_all,
                 ("%.1f%%" % (100 * move_acc_parsed)) if move_acc_parsed is not None else "n/a",
                 100 * dir_acc_all,
@@ -705,13 +818,32 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
             for f, nf in (("move", norm_move), ("vol_change", norm_cat), ("vs_iv", norm_cat), ("call", norm_dir))
         }
         out[label]["field_metrics"] = fm
-        print("  [%s:%s]  field        all  / major / balncd / lift  (parsed-only)" % (label_tag, label))
+        print("  [%s:%s]  field        all  / major / balncd / lift  (valid-only)" % (label_tag, label))
         for _f, _m in fm.items():
             if _m:
                 pr_str = ("%.1f%%" % (100 * _m["parsed_raw"])) if _m["parsed_raw"] is not None else "n/a"
                 print("                 %-11s %5.1f%% /%5.1f%% /%5.1f%% / %+5.1fpp  (%s)" % (
                     _f, 100 * _m["raw"], 100 * _m["majority"], 100 * _m["balanced"],
                     100 * _m["lift"], pr_str))
+
+    post_sha256 = None
+    try:
+        with open(real_path, "rb") as f:
+            post_sha256 = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        post_sha256 = None
+    out["_provenance"] = {
+        "path": real_path,
+        "sha256": pre_sha256,
+        "post_sha256": post_sha256,
+        "intact": (post_sha256 == pre_sha256),
+    }
+    if getattr(args, "contract_dir", None) and post_sha256 != pre_sha256:
+        import gauntlet_contract as gc
+        raise gc.ContractError(
+            "held-out dataset %s changed during evaluation run (pre=%s post=%s)"
+            % (real_path, pre_sha256[:16], (post_sha256 or "missing")[:16])
+        )
 
     if "BASE" in out and "FT" in out:
         out["_paired"] = _compute_paired_heldout_ci(out["BASE"]["rows"], out["FT"]["rows"])
@@ -794,14 +926,15 @@ def build_skew_system_prompt(args):
     return sp + "\n\n" + SKEW_FORMAT_REDIRECT
 
 
-def run_skew(base_url, ft_url, n, args):
+def run_skew(base_url, ft_url, n, args, model_by_side=None):
     """Train/serve-skew slice: identical to run_heldout() under production framing."""
     skew_sys = build_skew_system_prompt(args)
     if not skew_sys:
         print("  [skew] SKIP — production system prompt unavailable (see warnings above)")
         return None
     return run_heldout(base_url, ft_url, n, args,
-                       system_override=skew_sys, label_tag="skew")
+                       system_override=skew_sys, label_tag="skew",
+                       model_by_side=model_by_side)
 
 
 def heldout_perplexity(rows, args):
@@ -885,20 +1018,160 @@ _SIGNED_NUM_RE = re.compile(
 )
 
 
+_NEGATION_PRE_RE = re.compile(
+    r"(?:!=|!==|\u2260|<>)"
+    r"|\b(?:not|cannot|never|neither|nor|wrong|incorrect|false|"
+    r"rather\s+than|instead\s+of|unlike|except|excluding)\b"
+    r"|\b[a-z]+n't\b",
+    re.IGNORECASE,
+)
+
+_NEGATION_POST_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:is|are|was|were)\s+(?:wrong|incorrect|false|not\b)"
+    r"|\(\s*(?:wrong|incorrect|false|not\s+(?:correct|right|valid|true|the\s+answer))\s*\)"
+    r")",
+    re.IGNORECASE,
+)
+
+_FINAL_ANSWER_CUE_RE = re.compile(
+    r"(?:^|[\n.?;]|!(?!=))\s*[^\n.?;]{0,40}?"
+    r"\b(?:final\s+answer|(?:the\s+)?(?:correct\s+)?answer|result|"
+    r"breakeven(?:\s+at\s+expiry)?|maximum\s+(?:dollar\s+)?(?:position\s+)?size|"
+    r"max\s+size|contract\s+cost|total(?:\s+cost)?)\s*"
+    r"(?:(?:is|equals)\b|(?<![!<>])=(?!=)|:)\s*([^\n?;]+?)(?=(?:\.(?!\d))|!(?!=)|[\n?;]|$)",
+    re.IGNORECASE,
+)
+
+_STRUCTURED_NUM_KEYS = ("final_answer", "answer", "result", "value", "number")
+
+
+def _normalize_numeric_text(text):
+    s = re.sub(r"<mm:think>.*?</mm:think>", "", text or "", flags=re.S)
+    s = s.replace("\u2212", "-")
+    s = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", s)
+    return s
+
+
+def _signed_number_matches(norm_text):
+    """Return list of (float_val, start, end) for signed numbers in normalized text."""
+    out = []
+    for m in _SIGNED_NUM_RE.finditer(norm_text):
+        num = float(m.group("num"))
+        sign = -1.0 if (
+            m.group("neg_word")
+            or m.group("sign_pre") == "-"
+            or m.group("sign_post") == "-"
+        ) else 1.0
+        out.append((sign * num, m.start(), m.end()))
+    return out
+
+
+def _asserted_numbers_in_span(span):
+    """Extract non-negated signed numbers from a span, excluding explicitly negated mentions."""
+    matches = _signed_number_matches(span)
+    asserted = []
+    prev_end = 0
+    for val, start, end in matches:
+        # Local clause prefix: since the last sentence/clause boundary or previous number
+        seg = span[prev_end:start]
+        # Reset at clause delimiters (., !, ?, ;, \n, ,) when not inside a decimal or '!='
+        delim = None
+        for dm in re.finditer(r"(?:\.(?!\d)|!(?!=)|[?;\n,])", seg):
+            delim = dm
+        local_prefix = seg[delim.end():] if delim is not None else seg
+        local_suffix = span[end:]
+        if _NEGATION_PRE_RE.search(local_prefix):
+            prev_end = end
+            continue
+        if _NEGATION_POST_RE.search(local_suffix):
+            prev_end = end
+            continue
+        asserted.append(val)
+        prev_end = end
+    return asserted
+
+
+def _unique_scalar(vals, tol=1e-9):
+    """Return the unique float if all values agree within tol, else None."""
+    if not vals:
+        return None
+    first = vals[0]
+    if all(abs(v - first) <= tol for v in vals[1:]):
+        return first
+    return None
+
+
 def extract_signed_numbers(text):
     """Extract exact signed numeric quantities from text without stripping signs or decimals."""
     if not text:
         return []
-    # Normalize Unicode minus sign to ASCII '-'
-    s = text.replace("\u2212", "-")
-    # Strip thousands-separator commas only (e.g. 1,200 -> 1200)
-    s = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", s)
-    vals = []
-    for m in _SIGNED_NUM_RE.finditer(s):
-        num = float(m.group("num"))
-        sign = -1.0 if (m.group("neg_word") or m.group("sign_pre") == "-" or m.group("sign_post") == "-") else 1.0
-        vals.append(sign * num)
-    return vals
+    s = _normalize_numeric_text(text)
+    return [val for val, _st, _en in _signed_number_matches(s)]
+
+
+def extract_final_number(text):
+    """Extract ONE unambiguous, non-negated final numeric answer from structured JSON or text.
+
+    Rejects:
+      - Explicitly negated numbers (e.g. 'not +3', 'is not 298.29', '+3 is wrong', '!= 3')
+      - Ambiguous multi-number prose without a single final scalar or answer cue
+      - Non-numeric or boolean JSON answer fields
+    """
+    if not text or not text.strip():
+        return None
+    cleaned = re.sub(r"<mm:think>.*?</mm:think>", "", text, flags=re.S).strip()
+    if not cleaned:
+        return None
+
+    # 1. Structured JSON result object (e.g. {"answer": -3} or {"final_answer": 298.29})
+    jobj = extract_json(cleaned)
+    if isinstance(jobj, dict):
+        matched_keys = [k for k in _STRUCTURED_NUM_KEYS if k in jobj]
+        if matched_keys:
+            vals = []
+            for k in matched_keys:
+                raw_v = jobj[k]
+                if isinstance(raw_v, bool) or raw_v is None:
+                    return None
+                if isinstance(raw_v, (int, float)):
+                    if not math.isfinite(float(raw_v)):
+                        return None
+                    vals.append(float(raw_v))
+                elif isinstance(raw_v, str):
+                    sub = _unique_scalar(_asserted_numbers_in_span(_normalize_numeric_text(raw_v)))
+                    if sub is None:
+                        return None
+                    vals.append(sub)
+                else:
+                    return None
+            return _unique_scalar(vals)
+        # Pure JSON object without any recognized numeric answer field fails closed
+        stripped_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.S).strip()
+        if stripped_json.startswith("{") and stripped_json.endswith("}"):
+            return None
+
+    norm = _normalize_numeric_text(cleaned)
+
+    # 2. Explicit final-answer statement cue (use the LAST cue in the response)
+    cue_matches = list(_FINAL_ANSWER_CUE_RE.finditer(norm))
+    if cue_matches:
+        last_span = cue_matches[-1].group(1)
+        return _unique_scalar(_asserted_numbers_in_span(last_span))
+
+    # 3. Explicit positive equation ('=' not part of !=, <=, >=, ==)
+    eq_matches = list(re.finditer(r"(?<![!<>=])=(?!=)", norm))
+    if eq_matches:
+        rhs = norm[eq_matches[-1].end():]
+        # Stop at next sentence boundary if any
+        s_end = re.search(r"(?:\.(?!\d)|[!?;\n])", rhs)
+        rhs_clause = rhs[:s_end.start()] if s_end else rhs
+        rhs_vals = _asserted_numbers_in_span(rhs_clause)
+        if rhs_vals or _NEGATION_PRE_RE.search(rhs_clause):
+            return _unique_scalar(rhs_vals)
+
+    # 4. Whole-text single unambiguous non-negated scalar
+    return _unique_scalar(_asserted_numbers_in_span(norm))
 
 
 def _extract_tool_names(tool_calls):
@@ -956,8 +1229,8 @@ def run_check(c, text, tool_calls=None, *, err=None, finish_reason=None):
     if typ in ("llm_judge", "ib_grader"):
         return (lbl, None)
 
-    # Hard fail-closed gate on API/transport errors or content filter
-    if err or finish_reason in ("error", "content_filter"):
+    # Hard fail-closed gate on API/transport errors, content filter, or truncation
+    if err or finish_reason in ("error", "content_filter", "length"):
         return (lbl, False)
 
     t = text or ""
@@ -999,8 +1272,8 @@ def run_check(c, text, tool_calls=None, *, err=None, finish_reason=None):
     if typ == "equals_number":
         target = float(c["value"])
         tol = float(c.get("tolerance", 1e-6))
-        nums = extract_signed_numbers(t)
-        return (lbl, any(abs(v - target) <= tol for v in nums))
+        val = extract_final_number(t)
+        return (lbl, val is not None and abs(val - target) <= tol)
     if typ == "max_sentences":
         n = len([s for s in re.split(r"[.!?]+", t.strip()) if s.strip()])
         return (lbl, n <= c["n"])
@@ -1011,10 +1284,11 @@ def run_check(c, text, tool_calls=None, *, err=None, finish_reason=None):
     return (lbl, None)
 
 
-def score_battery(label, url, battery, system_default, args):
+def score_battery(label, url, battery, system_default, args, *,
+                  model=None, battery_sha256=None):
     """Run one battery's prompts/turns against a URL, score objective checks.
     Returns per-battery aggregate including full failure_census and per-row telemetry."""
-    model = detect_model(url) or label
+    eff_model = model or detect_model(url) or label
     hp = ht = judge_needed = empty = 0
     secs = 0.0
     census = new_failure_census()
@@ -1031,15 +1305,17 @@ def score_battery(label, url, battery, system_default, args):
         finish_reason = None
         err = None
         transcript = None
+        sent_turns = []
         t0 = time.time()
         if it.get("turns"):
             msgs = list(base_msgs)
             transcript = []
             for u in it["turns"]:
+                sent_turns.append(u)
                 msgs.append({"role": "user", "content": u})
                 txt, ctok, fr, tc, e = chat_text(
                     url, msgs, max_tokens=mt, temperature=0.0,
-                    thinking=thinking, tools=tools, model=model,
+                    thinking=thinking, tools=tools, model=eff_model,
                     timeout=args.timeout,
                 )
                 ctok_total += ctok
@@ -1051,13 +1327,26 @@ def score_battery(label, url, battery, system_default, args):
                 if e:
                     err = e
                     break
+            prompt_payload = {
+                "id": str(it["id"]),
+                "system": base_msgs[0]["content"] if base_msgs else None,
+                "tools": tools or None,
+                "turns": sent_turns,
+            }
         else:
             msgs = base_msgs + [{"role": "user", "content": it["prompt"]}]
+            prompt_payload = {
+                "id": str(it["id"]),
+                "system": base_msgs[0]["content"] if base_msgs else None,
+                "tools": tools or None,
+                "prompt": msgs[-1]["content"],
+            }
             text, ctok_total, finish_reason, tcalls, err = chat_text(
                 url, msgs, max_tokens=mt, temperature=0.0,
-                thinking=thinking, tools=tools, model=model,
+                thinking=thinking, tools=tools, model=eff_model,
                 timeout=args.timeout,
             )
+        prompt_sha256 = _canonical_sha256(prompt_payload)
         dt = time.time() - t0
         secs += dt
         if not (text or "").strip() and not tcalls:
@@ -1102,7 +1391,11 @@ def score_battery(label, url, battery, system_default, args):
             "text": text,
             "marks": marks,
             "checks": check_details,
+            "model": eff_model,
+            "prompt_sha256": prompt_sha256,
         }
+        if battery_sha256 is not None:
+            row["battery_sha256"] = battery_sha256
         if transcript is not None:
             row["transcript"] = transcript
         rows.append(row)
@@ -1110,7 +1403,7 @@ def score_battery(label, url, battery, system_default, args):
             print("    [%s] %-22s %5.1fs  [%s]  %s" % (label, it["id"], dt, status, "  ".join(marks)))
 
     finalize_failure_census(census)
-    return {
+    res = {
         "hp": hp,
         "ht": ht,
         "judge": judge_needed,
@@ -1119,20 +1412,31 @@ def score_battery(label, url, battery, system_default, args):
         "n": len(battery),
         "failure_census": census,
         "rows": rows,
-        "model": model,
+        "model": eff_model,
     }
+    if battery_sha256 is not None:
+        res["battery_sha256"] = battery_sha256
+    return res
 
 
-def load_battery(name, root=None):
+def load_battery_frozen(name, root=None):
+    """Read a battery JSON file once and return (items, sha256_hex) or (None, None)."""
     bdir = os.path.join(root or GG_ROOT, "batteries")
     path = os.path.join(bdir, name + ".json")
     if not os.path.exists(path):
-        return None
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        return None, None
+    with open(path, "rb") as f:
+        raw = f.read()
+    return json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()
 
 
-def run_gauntlet(base_url, ft_url, battery_names, args, system_default=None):
+def load_battery(name, root=None):
+    items, _sha = load_battery_frozen(name, root=root)
+    return items
+
+
+def run_gauntlet(base_url, ft_url, battery_names, args, system_default=None, *,
+                 frozen_batteries=None, model_by_side=None):
     """Generic: run a list of batteries base-vs-FT (or base-only), return per-target aggregate."""
     base_only = _is_base_only(base_url, ft_url, args)
     out = {"BASE": {}, "FT": {}, "_batteries": list(battery_names), "_base_only": base_only}
@@ -1141,13 +1445,21 @@ def run_gauntlet(base_url, ft_url, battery_names, args, system_default=None):
         return out
     sides = [("BASE", base_url)] + ([] if base_only else [("FT", ft_url)])
     for bn in battery_names:
-        b = load_battery(bn)
+        if frozen_batteries and bn in frozen_batteries:
+            b = frozen_batteries[bn]["items"]
+            b_sha = frozen_batteries[bn]["sha256"]
+        else:
+            b, b_sha = load_battery_frozen(bn)
         if b is None:
             print("  [%s] SKIP battery '%s' — not found in %s" % (args.mode, bn, BATT_DIR))
             continue
         print("  -- battery %s (%d items) --" % (bn, len(b)))
         for label, url in sides:
-            out[label][bn] = score_battery(label, url, b, system_default, args)
+            eff_model = (model_by_side or {}).get(label)
+            out[label][bn] = score_battery(
+                label, url, b, system_default, args,
+                model=eff_model, battery_sha256=b_sha,
+            )
             r = out[label][bn]
             fc = r["failure_census"]
             print("     [%s] %s: hard %d/%d  cov=%d/%d (%.0f%%)  judge=%d  empty=%d  %.0fs" % (
@@ -1157,61 +1469,44 @@ def run_gauntlet(base_url, ft_url, battery_names, args, system_default=None):
 
 
 # ----------------------------------------------------------------------------- contract & blind-judge integration
-def _write_verified_contracts(results, args, sysdefault_path=None):
-    """Persist and verify hash-bound gauntlet contracts + gordon-result.v2 files."""
+def _resolve_manifest_profile(run_bats, root_str):
     import gauntlet_contract as gc
 
+    run_bats_sorted = sorted(set(run_bats))
+    profiles = load_manifest_profiles(root_str)
+    for cand in ("trading", "general", "standard", "heavy", "smoke"):
+        if sorted(profiles.get(cand, [])) == run_bats_sorted:
+            return cand
+    for pname, pval in profiles.items():
+        if sorted(pval) == run_bats_sorted:
+            return pname
+    raise gc.ContractError(
+        "run batteries %r do not match any profile in battery_manifest.json" % (run_bats_sorted,)
+    )
+
+
+def _prepare_frozen_contracts(planned_bats, model_by_side, args, sysdefault_path=None):
+    """Freeze battery bytes, system prompt, and hash-bound run manifests BEFORE any model calls."""
+    import gauntlet_contract as gc
+
+    if not planned_bats:
+        return None
     contract_dir = Path(os.path.realpath(os.path.expanduser(args.contract_dir)))
     contract_dir.mkdir(parents=True, exist_ok=True)
     root = Path(os.path.realpath(GG_ROOT))
-
-    # Determine which batteries were actually run across gauntlet targets
-    combined_by_side = {"BASE": {}, "FT": {}}
-    for tag in ("trading-gauntlet", "gordon"):
-        g = results.get(tag)
-        if not g:
-            continue
-        for side in ("BASE", "FT"):
-            for bn, bres in (g.get(side) or {}).items():
-                combined_by_side[side][bn] = bres
-
-    if not combined_by_side["BASE"]:
-        return None
-
-    # Pick exact matching profile from battery_manifest.json
-    run_bats = sorted(combined_by_side["BASE"].keys())
-    profiles = load_manifest_profiles(str(root))
-    profile = None
-    for cand in ("trading", "general", "standard", "heavy", "smoke"):
-        if sorted(profiles.get(cand, [])) == run_bats:
-            profile = cand
-            break
-    if profile is None:
-        for pname, pval in profiles.items():
-            if sorted(pval) == run_bats:
-                profile = pname
-                break
-    if profile is None:
-        raise gc.ContractError(
-            "run batteries %r do not match any profile in battery_manifest.json" % (run_bats,)
-        )
+    profile = _resolve_manifest_profile(planned_bats, str(root))
 
     base_only = _is_base_only(args.base_url, args.ft_url, args)
     sides = [("BASE", args.base_url)] + ([] if base_only else [("FT", args.ft_url)])
-    receipts = {}
-    for side, url in sides:
-        side_bats = combined_by_side[side]
-        if not side_bats:
-            continue
-        first_res = next(iter(side_bats.values()))
-        raw_model = first_res.get("model") or side
-        safe_model = re.sub(r"[^A-Za-z0-9._-]", "_", str(raw_model))[:80] or side
-        if not re.match(r"^[A-Za-z0-9]", safe_model):
-            safe_model = "m_" + safe_model
 
+    runs_by_side = {}
+    frozen_batteries = None
+    frozen_system_text = None
+    for side, url in sides:
+        safe_model = gc.sanitize_model_id(model_by_side.get(side) or side, fallback=side)
         run_path = contract_dir / ("run.%s.json" % side)
         comp_path = contract_dir / ("completion.%s.json" % side)
-        run = gc.create_run_manifest(
+        run, side_frozen, side_sys_text = gc.freeze_run_manifest(
             root,
             profile=profile,
             label=side,
@@ -1221,9 +1516,68 @@ def _write_verified_contracts(results, args, sysdefault_path=None):
             system=sysdefault_path or "none",
             timeout=args.timeout,
         )
+        if frozen_batteries is None:
+            frozen_batteries = side_frozen
+            frozen_system_text = side_sys_text
+        else:
+            # Verify both sides froze identical battery bytes
+            for bn, info in side_frozen.items():
+                if frozen_batteries[bn]["sha256"] != info["sha256"]:
+                    raise gc.ContractError(
+                        "battery %s changed while freezing multi-side run contracts" % bn
+                    )
+        runs_by_side[side] = {
+            "run": run,
+            "run_path": run_path,
+            "comp_path": comp_path,
+        }
+
+    return {
+        "root": root,
+        "contract_dir": contract_dir,
+        "profile": profile,
+        "sides": runs_by_side,
+        "frozen_batteries": frozen_batteries or {},
+        "frozen_system_text": frozen_system_text,
+    }
+
+
+def _finalize_verified_contracts(prepared, results):
+    """Write gordon-result.v2 files and verify completion receipts against pre-call frozen manifests."""
+    import gauntlet_contract as gc
+
+    if not prepared:
+        return None
+    root = prepared["root"]
+    contract_dir = prepared["contract_dir"]
+    profile = prepared["profile"]
+
+    combined_by_side = {"BASE": {}, "FT": {}}
+    for tag in ("trading-gauntlet", "gordon"):
+        g = results.get(tag)
+        if not g:
+            continue
+        for side in ("BASE", "FT"):
+            for bn, bres in (g.get(side) or {}).items():
+                combined_by_side[side][bn] = bres
+
+    receipts = {}
+    for side, info in prepared["sides"].items():
+        side_bats = combined_by_side.get(side) or {}
+        if not side_bats:
+            continue
+        run = info["run"]
+        run_path = info["run_path"]
+        comp_path = info["comp_path"]
         for bn, bres in sorted(side_bats.items()):
             res_path = contract_dir / ("%s.%s.json" % (bn, side))
-            gc.write_battery_result_v2(run, bn, bres["rows"], res_path)
+            gc.write_battery_result_v2(
+                run,
+                bn,
+                bres["rows"],
+                res_path,
+                expected_battery_sha256=bres.get("battery_sha256"),
+            )
         comp = gc.complete_run_manifest(root, run_path, contract_dir, comp_path)
         verified_run, _ = gc.verify_complete(root, run_path, comp_path, contract_dir)
         receipts[side] = {
@@ -1239,7 +1593,7 @@ def _write_verified_contracts(results, args, sysdefault_path=None):
     return receipts
 
 
-def _write_blind_judge_packets(results, args):
+def _write_blind_judge_packets(results, args, frozen_batteries=None):
     """Export all llm_judge / ib_grader items via judge_blind.write_pending()."""
     import judge_blind as jb
 
@@ -1252,7 +1606,11 @@ def _write_blind_judge_packets(results, args):
             continue
         for side in ("BASE", "FT"):
             for bn, bres in (g.get(side) or {}).items():
-                batt_items = {it["id"]: it for it in (load_battery(bn) or [])}
+                if frozen_batteries and bn in frozen_batteries:
+                    batt_list = frozen_batteries[bn]["items"]
+                else:
+                    batt_list = load_battery(bn) or []
+                batt_items = {it["id"]: it for it in batt_list}
                 model = bres.get("model") or side
                 for row in bres.get("rows", []):
                     it = batt_items.get(row["id"], {})
@@ -1355,7 +1713,11 @@ def report(results, args):
             print("  %-22s %12s" % ("vol_change_acc (all)", pct(b.get("vol_change_acc"))))
             print("  %-22s %12s" % ("vs_iv_acc (all)", pct(b.get("vs_iv_acc"))))
             print("  %-22s %12s  (%d/%d)" % (
-                "parse_rate (coverage)", pct(b.get("parse_rate")), bc["succeeded"], bc["attempted"]))
+                "valid_coverage", pct(b.get("parse_rate")), bc["succeeded"], bc["attempted"]))
+            if "json_parse_rate" in b:
+                print("  %-22s %12s  (%d/%d, loose diag)" % (
+                    "json_parsed (loose)", pct(b.get("json_parse_rate")),
+                    b.get("json_parsed", 0), b.get("n", bc["attempted"])))
             print("  %-22s %12s  (cov %s)" % (
                 "exp_move_mae",
                 ("%.3f" % b["exp_move_mae"]) if b.get("exp_move_mae") is not None else "n/a",
@@ -1415,7 +1777,10 @@ def report(results, args):
             d_dir = line("dir_acc (all-case)", "dir_acc", "%.1f%%", True, 100, allow_arrow=not both_zero, ci_field="call")
             line("vol_change_acc (all)", "vol_change_acc", "%.1f%%", True, 100, allow_arrow=not both_zero, ci_field="vol_change")
             line("vs_iv_acc (all)", "vs_iv_acc", "%.1f%%", True, 100, allow_arrow=not both_zero, ci_field="vs_iv")
-            line("parse_rate (coverage)", "parse_rate", "%.1f%%", True, 100, allow_arrow=not both_zero)
+            line("valid_coverage", "parse_rate", "%.1f%%", True, 100, allow_arrow=not both_zero)
+            if "json_parse_rate" in b or "json_parse_rate" in f:
+                print("  %-22s %12s %12s  (loose diag — NOT for gating)" % (
+                    "json_parsed (loose)", pct(b.get("json_parse_rate")), pct(f.get("json_parse_rate"))))
 
             # MAE arrow gated on comparable coverage so 1/10 lucky parse can't claim ✓FT
             mae_cov_ok = (
@@ -1721,41 +2086,82 @@ def main(argv=None):
     sysdefault = None
     sysdefault_path = None
     if args.system and os.path.exists(args.system):
-        with open(args.system, encoding="utf-8") as f:
+        sysdefault_path = os.path.realpath(args.system)
+        with open(sysdefault_path, encoding="utf-8") as f:
             sysdefault = f.read()
-        sysdefault_path = os.path.abspath(args.system)
 
-    print("BASE url:", args.base_url, "| model:", detect_model(args.base_url))
+    detected_base = detect_model(args.base_url)
+    detected_ft = None if base_only else detect_model(ft_url)
+    model_by_side = {"BASE": detected_base or "BASE"}
+    if not base_only:
+        model_by_side["FT"] = detected_ft or "FT"
+
+    print("BASE url:", args.base_url, "| model:", detected_base)
     if base_only:
         print("FT   url: (base-only mode — skipped)")
     else:
-        print("FT   url:", ft_url, "| model:", detect_model(ft_url))
+        print("FT   url:", ft_url, "| model:", detected_ft)
     print("Gauntlet root:", GG_ROOT)
 
     trading_bats = get_trading_batteries(GG_ROOT)
     general_bats = get_general_batteries(GG_ROOT, trading_batteries=trading_bats)
 
+    planned_gauntlet_bats = []
+    if args.mode in ("trading-gauntlet", "all"):
+        planned_gauntlet_bats.extend(trading_bats)
+    if args.mode in ("gordon", "all"):
+        planned_gauntlet_bats.extend(general_bats)
+    planned_gauntlet_bats = sorted(set(planned_gauntlet_bats))
+
+    # Freeze battery bytes (and run contracts if --contract-dir) BEFORE any model calls
+    prepared_contracts = None
+    frozen_batteries = {}
+    if args.contract_dir and planned_gauntlet_bats:
+        prepared_contracts = _prepare_frozen_contracts(
+            planned_gauntlet_bats, model_by_side, args, sysdefault_path=sysdefault_path
+        )
+        frozen_batteries = prepared_contracts["frozen_batteries"]
+        if prepared_contracts["frozen_system_text"] is not None:
+            sysdefault = prepared_contracts["frozen_system_text"]
+    else:
+        for bn in planned_gauntlet_bats:
+            items, b_sha = load_battery_frozen(bn)
+            if items is not None:
+                frozen_batteries[bn] = {"items": items, "sha256": b_sha}
+
     results = {}
     if args.mode in ("held-out", "all"):
         print("\n### TARGET 1: HELD-OUT TRADING SET")
-        results["held-out"] = run_heldout(args.base_url, ft_url, args.n, args)
+        results["held-out"] = run_heldout(
+            args.base_url, ft_url, args.n, args, model_by_side=model_by_side
+        )
         if args.skew:
             print("\n### TARGET 1b: TRAIN/SERVE SKEW (held-out rows under PRODUCTION prompt)")
-            results["skew"] = run_skew(args.base_url, ft_url, args.n, args)
+            results["skew"] = run_skew(
+                args.base_url, ft_url, args.n, args, model_by_side=model_by_side
+            )
     if args.mode in ("trading-gauntlet", "all"):
         print("\n### TARGET 2: TRADING GAUNTLET")
-        results["trading-gauntlet"] = run_gauntlet(args.base_url, ft_url, trading_bats, args, sysdefault)
+        results["trading-gauntlet"] = run_gauntlet(
+            args.base_url, ft_url, trading_bats, args, sysdefault,
+            frozen_batteries=frozen_batteries, model_by_side=model_by_side,
+        )
     if args.mode in ("gordon", "all"):
         print("\n### TARGET 3: GORDON GAUNTLET (general regression — disjoint from trading)")
-        results["gordon"] = run_gauntlet(args.base_url, ft_url, general_bats, args, sysdefault)
+        results["gordon"] = run_gauntlet(
+            args.base_url, ft_url, general_bats, args, sysdefault,
+            frozen_batteries=frozen_batteries, model_by_side=model_by_side,
+        )
 
-    if args.contract_dir:
-        receipts = _write_verified_contracts(results, args, sysdefault_path=sysdefault_path)
+    if prepared_contracts is not None:
+        receipts = _finalize_verified_contracts(prepared_contracts, results)
         if receipts:
             results["_contracts"] = receipts
 
     if args.blind_judge_dir:
-        results["_blind_judge"] = _write_blind_judge_packets(results, args)
+        results["_blind_judge"] = _write_blind_judge_packets(
+            results, args, frozen_batteries=frozen_batteries
+        )
 
     # save raw answers for in-session / local-judge grading of llm_judge items
     out_parent = os.path.dirname(os.path.abspath(args.out))

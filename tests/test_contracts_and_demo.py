@@ -81,6 +81,61 @@ class TestContractsAndOfflineDemo(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
             self.assertEqual(proc.stdout.strip(), run["run_id"])
 
+    def test_gauntlet_contract_rejects_mismatched_prompt_digest_and_model(self):
+        """EV07: Per-row prompt_sha256 and model mismatches fail strict contract verification."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(os.path.realpath(tmp))
+            root_path = Path(os.path.realpath(REPO_ROOT))
+            run_path = tmp_path / "run.BASE.json"
+            comp_path = tmp_path / "completion.BASE.json"
+            run, frozen, _sys = gc.freeze_run_manifest(
+                root_path,
+                profile="general",
+                label="BASE",
+                endpoint="http://127.0.0.1:8000/v1/chat/completions",
+                model_id="test-model",
+                out_path=run_path,
+            )
+            items = frozen["general_reasoning"]["items"]
+            # Bad prompt_sha256 must fail complete_run_manifest against frozen battery
+            bad_rows = [
+                {
+                    "id": it["id"],
+                    "sec": 0.1,
+                    "finish": "stop",
+                    "ctok": 5,
+                    "tool_calls": False,
+                    "err": None,
+                    "text": "ok",
+                    "model": "test-model",
+                    "prompt_sha256": "0" * 64,
+                }
+                for it in items
+            ]
+            res_path = tmp_path / "general_reasoning.BASE.json"
+            gc.write_battery_result_v2(run, "general_reasoning", bad_rows, res_path)
+            with self.assertRaises(gc.ContractError):
+                gc.complete_run_manifest(root_path, run_path, tmp_path, comp_path)
+
+            # Bad model must fail write_battery_result_v2 / validate_result immediately
+            res_path.unlink()
+            bad_model_rows = [
+                {
+                    "id": it["id"],
+                    "sec": 0.1,
+                    "finish": "stop",
+                    "ctok": 5,
+                    "tool_calls": False,
+                    "err": None,
+                    "text": "ok",
+                    "model": "different-model",
+                    "prompt_sha256": gc.item_prompt_sha256(it),
+                }
+                for it in items
+            ]
+            with self.assertRaises(gc.ContractError):
+                gc.write_battery_result_v2(run, "general_reasoning", bad_model_rows, res_path)
+
     def test_variance_band_cli(self):
         proc = subprocess.run(
             [

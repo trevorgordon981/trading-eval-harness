@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Regression tests for eval_finetuned.py covering EV01, EV02, EV04, EV05, EV07."""
+"""Regression tests for eval_finetuned.py covering EV01, EV02, EV04, EV05, EV07, EV08, EV09."""
 
+import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -12,6 +14,7 @@ import unittest
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -239,6 +242,63 @@ class TestEV02ObjectiveChecks(unittest.TestCase):
         self.assertFalse(ef.run_check({"type": "equals_number", "value": 829}, "829", err="HTTP 500")[1])
         self.assertFalse(ef.run_check({"type": "contains_none", "values": ["ARKK"]}, "clean text", err="timed out")[1])
         self.assertFalse(ef.run_check({"type": "non_empty"}, "text", finish_reason="content_filter")[1])
+        self.assertFalse(ef.run_check({"type": "equals_number", "value": 829}, "829", finish_reason="length")[1])
+
+    def test_negated_and_ambiguous_numeric_answers_never_earn_credit(self):
+        """EV02 / EV08: Negated target numbers and shotgun prose must NEVER pass equals_number."""
+        chk_pos3 = {"type": "equals_number", "value": 3}
+        chk_neg3 = {"type": "equals_number", "value": -3}
+        chk_be = {"type": "equals_number", "value": 298.29}
+        chk_cap = {"type": "equals_number", "value": 1200}
+
+        # Exact EV02 / EV08 counterexample
+        self.assertFalse(ef.run_check(chk_pos3, "The correct answer is -3, not +3.")[1])
+        self.assertFalse(ef.run_check(chk_pos3, "The correct answer is -3, not +3")[1])
+        self.assertTrue(ef.run_check(chk_neg3, "The correct answer is -3, not +3.")[1])
+
+        # Direct negations of target values
+        for negated in (
+            "not +3",
+            "The answer is not +3.",
+            "It isn't +3.",
+            "+3 is wrong.",
+            "+3 is incorrect.",
+            "Answer != +3",
+            "Answer \u2260 +3",
+            "Neither +3 nor -3.",
+            "The answer is -3 instead of +3.",
+            "Rather than +3, the result is -3.",
+            "Wrong: +3. Right: -3.",
+            "The answer is +3 (wrong), actually -3.",
+        ):
+            self.assertFalse(ef.run_check(chk_pos3, negated)[1], msg=f"should reject: {negated}")
+
+        for negated_be in (
+            "Breakeven is not 298.29.",
+            "It is not $298.29.",
+            "The breakeven isn't $298.29",
+            "298.29 is incorrect.",
+            "The breakeven is $290.00, not $298.29.",
+        ):
+            self.assertFalse(ef.run_check(chk_be, negated_be)[1], msg=f"should reject: {negated_be}")
+
+        # Ambiguous / shotgun multi-number prose must fail closed
+        self.assertFalse(ef.run_check(chk_pos3, "It could be -3 or +3.")[1])
+        self.assertFalse(ef.run_check(chk_be, "$829 $1200 $298.29 18")[1])
+
+        # Structured JSON final-answer parsing (strict scalar field)
+        self.assertTrue(ef.run_check(chk_pos3, '{"answer": 3}')[1])
+        self.assertFalse(ef.run_check(chk_pos3, '{"answer": -3}')[1])
+        self.assertTrue(ef.run_check(chk_be, '{"final_answer": 298.29}')[1])
+        self.assertFalse(ef.run_check(chk_pos3, '{"answer": true}')[1])
+        self.assertFalse(ef.run_check(chk_pos3, '{"answer": null}')[1])
+        self.assertFalse(ef.run_check(chk_pos3, '{}')[1])
+        self.assertFalse(ef.run_check(chk_pos3, '{"answer": "not +3"}')[1])
+
+        # Legitimate equations and single final assertions still pass
+        self.assertTrue(ef.run_check(chk_be, "290 + 8.29 = $298.29.")[1])
+        self.assertTrue(ef.run_check(chk_cap, "The answer is $1,200 (not $1,000).")[1])
+        self.assertTrue(ef.run_check(chk_pos3, "It's not -3, it's +3.")[1])
 
 
 class TestEV04BaseOnlyMode(unittest.TestCase):
@@ -460,6 +520,234 @@ class TestEV07ContractAndBlindJudgeIntegration(unittest.TestCase):
                 self.assertIn(pr["answer_uid"], umap)
                 for forbidden in ("model", "label", "key"):
                     self.assertNotIn(forbidden, pr)
+
+            # Every gordon-result.v2 row records effective model and prompt_sha256
+            gr_res = json.loads((Path(contract_dir) / "general_reasoning.BASE.json").read_text(encoding="utf-8"))
+            for row in gr_res["results"]:
+                self.assertEqual(row["model"], "base-v1")
+                self.assertRegex(row["prompt_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_mid_run_battery_mutation_fails_contract_verification(self):
+        """EV07: Mutating a same-ID battery prompt mid-run MUST fail closed (no verified receipt)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            shutil.copytree(Path(REPO_ROOT) / "batteries", root / "batteries")
+            shutil.copyfile(Path(REPO_ROOT) / "battery_manifest.json", root / "battery_manifest.json")
+            battery = root / "batteries" / "general_reasoning.json"
+            pre_bytes = battery.read_bytes()
+            pre_sha = hashlib.sha256(pre_bytes).hexdigest()
+
+            prompts_sent = []
+            mutated = False
+
+            def responder(url, messages, **kw):
+                nonlocal mutated
+                prompts_sent.append(messages[-1]["content"])
+                if not mutated:
+                    original = json.loads(battery.read_text(encoding="utf-8"))
+                    original[0]["prompt"] = "NEW_PRESERVED_ID_FIXTURE"
+                    battery.write_text(json.dumps(original), encoding="utf-8")
+                    mutated = True
+                return "sample response", 3, "stop", [], None
+
+            contract_dir = root / "contracts"
+            with patch.object(ef, "GG_ROOT", str(root)), \
+                 patch.object(ef, "BATT_DIR", str(root / "batteries")), \
+                 patch.object(ef, "detect_model", return_value="fixture"), \
+                 patch.object(ef, "chat_text", responder), \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaises(gc.ContractError):
+                    ef.main([
+                        "--base-url", "http://127.0.0.1:4321/v1/chat/completions",
+                        "--mode", "gordon",
+                        "--contract-dir", str(contract_dir),
+                        "--out", str(root / "output.json"),
+                    ])
+
+            post_sha = hashlib.sha256(battery.read_bytes()).hexdigest()
+            self.assertNotEqual(pre_sha, post_sha)
+            # Frozen pre-call bytes were bound in run.BASE.json and sent to the model
+            run_manifest = json.loads((contract_dir / "run.BASE.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_manifest["batteries"][0]["sha256"], pre_sha)
+            self.assertNotEqual(run_manifest["batteries"][0]["sha256"], post_sha)
+            self.assertTrue(prompts_sent)
+            self.assertNotIn("NEW_PRESERVED_ID_FIXTURE", prompts_sent)
+            # No completion receipt may exist for the tampered run
+            self.assertFalse((contract_dir / "completion.BASE.json").exists())
+
+    def test_mid_run_heldout_mutation_fails_when_contract_dir_set(self):
+        """EV07: Mutating the held-out JSONL mid-run with --contract-dir MUST fail closed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            heldout = root / "heldout3.jsonl"
+            _make_heldout_file(str(heldout), n=3)
+            mutated = False
+
+            def responder(url, messages, **kw):
+                nonlocal mutated
+                if not mutated:
+                    heldout.write_text(heldout.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+                    mutated = True
+                return json.dumps({
+                    "move": "QUIET", "call": "UP", "vol_change": "EXPANDING",
+                    "vs_iv": "RICH", "exp_move_pct": 2.0, "conviction": 8,
+                }), 12, "stop", [], None
+
+            with patch.object(ef, "detect_model", return_value="fixture"), \
+                 patch.object(ef, "chat_text", responder), \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaises(gc.ContractError):
+                    ef.main([
+                        "--base-url", "http://127.0.0.1:4321/v1/chat/completions",
+                        "--mode", "held-out",
+                        "--heldout", str(heldout),
+                        "--contract-dir", str(root / "contracts"),
+                        "--out", str(root / "output.json"),
+                    ])
+
+
+class TestEV09HeldoutSchemaValidation(unittest.TestCase):
+    """EV09: Empty, malformed, partial, or truncated forecast JSONs MUST fail valid coverage."""
+
+    def test_empty_object_with_length_finish_fails_valid_coverage_gate(self):
+        """Exact EV09 counterexample: 10x '{}' with finish_reason='length' -> 0% valid coverage."""
+        with tempfile.TemporaryDirectory() as tmp:
+            heldout = os.path.join(tmp, "heldout10.jsonl")
+            _make_heldout_file(heldout, n=10)
+            out_json = os.path.join(tmp, "empty_len.json")
+
+            def empty_length(url, messages, **kw):
+                return "{}", 0, "length", [], None
+
+            with patch.object(ef, "detect_model", return_value="fixture"), \
+                 patch.object(ef, "chat_text", empty_length), \
+                 redirect_stdout(io.StringIO()) as buf:
+                results = ef.main([
+                    "--base-url", "http://127.0.0.1:4321/v1/chat/completions",
+                    "--ft-url", "http://127.0.0.1:4322/v1/chat/completions",
+                    "--mode", "held-out",
+                    "--heldout", heldout,
+                    "--out", out_json,
+                ])
+                output = buf.getvalue()
+
+            ho = results["held-out"]
+            for side in ("BASE", "FT"):
+                s = ho[side]
+                self.assertEqual(s["parse_rate"], 0.0)
+                self.assertEqual(s["valid_coverage"], 0.0)
+                self.assertEqual(s["valid_count"], 0)
+                self.assertEqual(s["move_acc"], 0.0)
+                self.assertEqual(s["dir_acc"], 0.0)
+                # Loose JSON parse diagnostic tracked separately
+                self.assertEqual(s["json_parsed"], 10)
+                self.assertEqual(s["json_parse_rate"], 1.0)
+                fc = s["failure_census"]
+                self.assertEqual(fc["succeeded"], 0)
+                self.assertEqual(fc["failed"], 10)
+                self.assertEqual(fc["coverage_rate"], 0.0)
+                self.assertEqual(fc["by_reason"]["truncated"], 10)
+                for row in s["rows"]:
+                    self.assertFalse(row["parsed"])
+                    self.assertFalse(row["schema_valid"])
+                    self.assertTrue(row["json_parsed"])
+                    self.assertEqual(row["status"], "truncated")
+                    self.assertIsNone(row["pred"])
+            self.assertIn("VERDICT WITHHELD", output)
+
+    def test_empty_and_malformed_objects_with_stop_fail_as_schema_error(self):
+        """Empty {}, missing required fields, and invalid types all fail with schema_error."""
+        bad_payloads = [
+            "{}",  # empty object
+            json.dumps({"move": "QUIET", "call": "UP"}),  # missing required fields
+            json.dumps({  # invalid enum value
+                "move": "MEGA", "call": "UP", "vol_change": "STABLE",
+                "vs_iv": "FAIR", "exp_move_pct": 2.0, "conviction": 5,
+            }),
+            json.dumps({  # wrong type (bool) for exp_move_pct
+                "move": "QUIET", "call": "UP", "vol_change": "STABLE",
+                "vs_iv": "FAIR", "exp_move_pct": True, "conviction": 5,
+            }),
+            json.dumps({  # wrong type (string) for exp_move_pct
+                "move": "QUIET", "call": "UP", "vol_change": "STABLE",
+                "vs_iv": "FAIR", "exp_move_pct": "bad", "conviction": 5,
+            }),
+            json.dumps({  # out-of-range conviction
+                "move": "QUIET", "call": "UP", "vol_change": "STABLE",
+                "vs_iv": "FAIR", "exp_move_pct": 2.0, "conviction": 99,
+            }),
+            json.dumps({  # non-string call type
+                "move": "QUIET", "call": ["UP"], "vol_change": "STABLE",
+                "vs_iv": "FAIR", "exp_move_pct": 2.0, "conviction": 5,
+            }),
+            json.dumps({  # negative exp_move_pct
+                "move": "QUIET", "call": "UP", "vol_change": "STABLE",
+                "vs_iv": "FAIR", "exp_move_pct": -1.5, "conviction": 5,
+            }),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            heldout = os.path.join(tmp, "heldout8.jsonl")
+            _make_heldout_file(heldout, n=len(bad_payloads))
+            out_json = os.path.join(tmp, "schema_fail.json")
+            call_idx = {"n": 0}
+
+            def bad_responder(url, messages, **kw):
+                payload = bad_payloads[call_idx["n"] % len(bad_payloads)]
+                call_idx["n"] += 1
+                return payload, 10, "stop", [], None
+
+            with patch.object(ef, "detect_model", return_value="fixture"), \
+                 patch.object(ef, "chat_text", bad_responder), \
+                 redirect_stdout(io.StringIO()) as buf:
+                results = ef.main([
+                    "--base-url", "http://127.0.0.1:4321/v1/chat/completions",
+                    "--mode", "held-out",
+                    "--heldout", heldout,
+                    "--out", out_json,
+                ])
+                output = buf.getvalue()
+
+            b = results["held-out"]["BASE"]
+            self.assertEqual(b["parse_rate"], 0.0)
+            self.assertEqual(b["valid_coverage"], 0.0)
+            self.assertEqual(b["json_parsed"], len(bad_payloads))
+            self.assertEqual(b["move_acc"], 0.0)
+            self.assertEqual(b["dir_acc"], 0.0)
+            self.assertEqual(b["failure_census"]["succeeded"], 0)
+            self.assertEqual(b["failure_census"]["by_reason"]["schema_error"], len(bad_payloads))
+            for row in b["rows"]:
+                self.assertEqual(row["status"], "schema_error")
+                self.assertFalse(row["parsed"])
+                self.assertFalse(row["schema_valid"])
+                self.assertTrue(row["schema_errors"])
+                self.assertIsNone(row["pred"])
+            self.assertIn("VERDICT WITHHELD", output)
+
+    def test_valid_schema_with_length_finish_still_rejected_as_truncated(self):
+        """Even if all 6 fields appear, finish_reason='length' is NOT an allowed terminal status."""
+        with tempfile.TemporaryDirectory() as tmp:
+            heldout = os.path.join(tmp, "heldout2.jsonl")
+            _make_heldout_file(heldout, n=2)
+            out_json = os.path.join(tmp, "trunc_valid.json")
+            valid_json = json.dumps({
+                "move": "QUIET", "call": "UP", "vol_change": "EXPANDING",
+                "vs_iv": "RICH", "exp_move_pct": 2.0, "conviction": 8,
+            })
+
+            with patch.object(ef, "detect_model", return_value="fixture"), \
+                 patch.object(ef, "chat_text", return_value=(valid_json, 160, "length", [], None)), \
+                 redirect_stdout(io.StringIO()):
+                results = ef.main([
+                    "--base-url", "http://127.0.0.1:4321/v1/chat/completions",
+                    "--mode", "held-out",
+                    "--heldout", heldout,
+                    "--out", out_json,
+                ])
+
+            b = results["held-out"]["BASE"]
+            self.assertEqual(b["valid_coverage"], 0.0)
+            self.assertEqual(b["move_acc"], 0.0)
+            self.assertEqual(b["failure_census"]["by_reason"]["truncated"], 2)
 
 
 if __name__ == "__main__":

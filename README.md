@@ -15,8 +15,9 @@ strictly disjoint targets and prints a reliability-gated scorecard plus verdict:
 2. **trading-gauntlet** — trading batteries from the `trading` profile in
    `battery_manifest.json` (`tickers`, `trademath`, `trader`) probing options
    math, affordability discipline, long-debit structure constraints, and ticker
-   scouting. Objective checks fail closed on HTTP errors, timeouts, empty
-   replies, explicit refusals, wrong numeric signs, and missing structured tool
+   scouting. Objective checks fail closed on HTTP errors, timeouts, truncation
+   (`finish_reason=length`), empty replies, explicit refusals, wrong or negated
+   numeric answers, ambiguous multi-number prose, and missing structured tool
    calls. Subjective `llm_judge` items are flagged and optionally exported blind
    via `--blind-judge-dir`.
 3. **gordon** — general-ability regression over strictly **disjoint non-trading
@@ -91,18 +92,25 @@ failures can never be hidden behind conditional denominators:
     "timeout": 1,
     "empty": 0,
     "refusal": 0,
-    "parse_error": 1
+    "truncated": 0,
+    "parse_error": 1,
+    "schema_error": 0
   }
 }
 ```
 
 - `attempted`: total scenarios/items sent to the endpoint.
-- `succeeded`: terminal items that returned a non-error, non-empty, non-refused
-  response (and valid JSON object for `held-out` / `skew`).
+- `succeeded`: terminal items that returned an allowed terminal status
+  (`stop`, or `tool_calls` for gauntlet items), non-empty, non-refused
+  response — and for `held-out` / `skew`, a JSON object passing strict typed
+  6-field forecast schema validation (`validate_heldout_forecast`).
 - `failed`: `attempted - succeeded`.
 - `coverage_rate`: `succeeded / attempted` (`0.0` when `attempted == 0`).
 - `by_reason`: exact counts across `http_error`, `timeout`, `empty`, `refusal`,
-  and `parse_error`.
+  `truncated`, `parse_error`, and `schema_error`.
+- Loose JSON parsing (`json_parsed`, `json_parse_rate`) is tracked separately
+  as a diagnostic and never satisfies valid coverage when required forecast
+  fields are missing, mistyped, or truncated (`finish_reason=length`).
 
 Comparative improvement and parity verdicts are gated on
 `coverage_rate >= --min-coverage` (default `0.80`). Runs below threshold emit
@@ -182,8 +190,12 @@ sidecar. Wired directly into `eval_finetuned.py --blind-judge-dir`.
 Creates and verifies **hash-bound** run manifests (`gordon-run.v1`), battery
 result files (`gordon-result.v2`), and completion receipts
 (`gordon-run-completion.v1`) against `battery_manifest.json`. Wired directly
-into `eval_finetuned.py --contract-dir` and also runnable standalone via CLI
-(`list`, `create-run`, `complete-run`, `verify-run`).
+into `eval_finetuned.py --contract-dir` — which freezes manifest, battery
+bytes, and optional system prompt **before** the first model call, records
+effective per-request `model` and `prompt_sha256` digests on every result row,
+and verifies at completion that no battery, manifest, system prompt, or result
+changed during the run. Also runnable standalone via CLI (`list`, `create-run`,
+`complete-run`, `verify-run`).
 
 ## Methodology limits & honest scope
 
