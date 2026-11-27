@@ -242,6 +242,7 @@ def load_battery_frozen(
         "sha256": digest,
         "version": digest[:16],
         "ids": ids,
+        "case_ids_sha256": canonical_sha(ids),
     }
     return entry, raw, value
 

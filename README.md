@@ -141,8 +141,11 @@ Reported metrics per model:
 - **parse_rate / failure_census**: valid coverage and failure breakdown.
 - **exp_move_mae** and **exp_move_mae_coverage**: MAE alongside coverage so
   sparse parses cannot claim an MAE win.
-- **Paired 95% bootstrap CIs** (`_paired`): computed on immutable `case_id`s
-  via `variance.paired_bootstrap_delta_ci`.
+- **Paired 95% bootstrap CIs** (`_paired`): computed on validated, strictly
+  unique `case_id`s with exact paired membership (`set(base_ids) == set(ft_ids)`)
+  via `variance.paired_bootstrap_delta_ci`; duplicate explicit IDs fail closed
+  before any LLM request and every output/manifest includes a deterministic
+  `case_ids_sha256` identity digest.
 - **Per-field majority baseline, balanced accuracy, and lift** (`field_metrics`).
 
 ## Eval methodology modules

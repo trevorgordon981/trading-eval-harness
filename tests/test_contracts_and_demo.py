@@ -48,6 +48,7 @@ class TestContractsAndOfflineDemo(unittest.TestCase):
                 out_path=run_path,
             )
             for entry in run["batteries"]:
+                self.assertEqual(entry["case_ids_sha256"], gc.canonical_sha(entry["ids"]))
                 rows = [
                     {
                         "id": item_id,

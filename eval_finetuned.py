@@ -470,31 +470,222 @@ def _is_base_only(base_url, ft_url, args=None):
 
 
 def _heldout_case_id(row, idx, user_text):
-    if isinstance(row, dict) and row.get("id") is not None:
-        return str(row["id"])
+    if not isinstance(row, dict):
+        raise ValueError("held-out row %d is not a JSON object" % idx)
+    if "id" in row and row["id"] is not None:
+        raw_id = row["id"]
+        if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
+            raise ValueError("held-out row %d has invalid explicit id: %r" % (idx, raw_id))
+        cid = str(raw_id)
+        if not cid.strip():
+            raise ValueError("held-out row %d has blank explicit id" % idx)
+        return cid
     digest = hashlib.sha1((user_text or "").encode("utf-8", "replace")).hexdigest()[:8]
     return "case_%04d_%s" % (idx, digest)
 
 
+def _canonical_sha256(obj):
+    payload = (json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def compute_case_ids_sha256(case_ids):
+    """Return deterministic SHA-256 hex digest of an ordered sequence of case IDs."""
+    return _canonical_sha256([str(cid) for cid in case_ids])
+
+
+def validate_heldout_case_ids(rows, source_label="held-out"):
+    """Validate that every held-out row resolves to a strictly unique case_id.
+
+    Fails closed with ValueError on invalid, blank, or duplicate explicit/resolved
+    case IDs before any LLM request is issued or paired statistic is computed.
+    Returns (case_ids: list[str], case_ids_sha256: str).
+    """
+    if not isinstance(rows, list):
+        raise ValueError("%s rows must be a list" % source_label)
+    case_ids = []
+    seen = {}
+    duplicates = {}
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError("%s row %d is not a JSON object" % (source_label, idx))
+        msgs = row.get("messages")
+        if not isinstance(msgs, list):
+            raise ValueError("%s row %d is missing a valid 'messages' list" % (source_label, idx))
+        user = next(
+            (m.get("content") for m in msgs if isinstance(m, dict) and m.get("role") == "user"),
+            None,
+        )
+        cid = _heldout_case_id(row, idx, user)
+        if cid in seen:
+            duplicates.setdefault(cid, [seen[cid]]).append(idx)
+        else:
+            seen[cid] = idx
+        case_ids.append(cid)
+    if duplicates:
+        dup_desc = ", ".join(
+            "%r (rows %s)" % (cid, ",".join(str(i) for i in idxs))
+            for cid, idxs in sorted(duplicates.items())
+        )
+        raise ValueError(
+            "Duplicate case_id(s) in %s (%d unique across %d rows): %s"
+            % (source_label, len(seen), len(rows), dup_desc)
+        )
+    return case_ids, compute_case_ids_sha256(case_ids)
+
+
+def _load_and_validate_heldout(path, n=None):
+    """Read a held-out JSONL file once, validate unique case IDs, and apply stride sampling.
+
+    Validates ALL loaded rows before stride sampling AND the selected rows after
+    sampling so duplicate explicit or resolved case IDs always fail closed with
+    ValueError prior to any LLM requests.
+    Returns (real_path, pre_sha256, rows, case_ids, case_ids_sha256).
+    """
+    real_path = os.path.realpath(path)
+    with open(real_path, "rb") as f:
+        raw_bytes = f.read()
+    pre_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    rows = []
+    for line in raw_bytes.decode("utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    if not rows:
+        return real_path, pre_sha256, [], [], None
+    validate_heldout_case_ids(rows, source_label=path)
+    if n and n < len(rows):
+        # deterministic stride sample for reproducibility
+        step = max(1, len(rows) // n)
+        rows = rows[::step][:n]
+    case_ids, case_ids_sha256 = validate_heldout_case_ids(rows, source_label=path)
+    return real_path, pre_sha256, rows, case_ids, case_ids_sha256
+
+
+def validate_battery_items(items, battery_name="battery"):
+    """Validate that every battery item has a valid, strictly unique id.
+
+    Fails closed with ValueError on missing, blank, or duplicate item IDs
+    before any LLM request is issued.
+    Returns (item_ids: list[str], case_ids_sha256: str).
+    """
+    if not isinstance(items, list):
+        raise ValueError("battery %s must be a JSON list" % battery_name)
+    item_ids = []
+    seen = {}
+    duplicates = {}
+    for idx, it in enumerate(items):
+        if not isinstance(it, dict):
+            raise ValueError("battery %s item %d is not a JSON object" % (battery_name, idx))
+        raw_id = it.get("id")
+        if raw_id is None or isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
+            raise ValueError(
+                "battery %s item %d has missing or invalid id: %r" % (battery_name, idx, raw_id)
+            )
+        item_id = str(raw_id)
+        if not item_id.strip():
+            raise ValueError("battery %s item %d has blank id" % (battery_name, idx))
+        if item_id in seen:
+            duplicates.setdefault(item_id, [seen[item_id]]).append(idx)
+        else:
+            seen[item_id] = idx
+        item_ids.append(item_id)
+    if duplicates:
+        dup_desc = ", ".join(
+            "%r (items %s)" % (cid, ",".join(str(i) for i in idxs))
+            for cid, idxs in sorted(duplicates.items())
+        )
+        raise ValueError(
+            "Duplicate item id(s) in battery %s (%d unique across %d items): %s"
+            % (battery_name, len(seen), len(items), dup_desc)
+        )
+    return item_ids, compute_case_ids_sha256(item_ids)
+
+
+def _validate_paired_row_ids(rows, side_label):
+    """Validate every result row carries a valid, strictly unique case_id."""
+    if not isinstance(rows, (list, tuple)):
+        raise ValueError("%s rows must be a sequence" % side_label)
+    ordered_ids = []
+    by_id = {}
+    duplicates = {}
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError("%s row %d is not a dict" % (side_label, idx))
+        if "case_id" not in row or row["case_id"] is None:
+            raise ValueError("%s row %d is missing required 'case_id'" % (side_label, idx))
+        raw_id = row["case_id"]
+        if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
+            raise ValueError("%s row %d has invalid 'case_id': %r" % (side_label, idx, raw_id))
+        cid = str(raw_id)
+        if not cid.strip():
+            raise ValueError("%s row %d has blank 'case_id'" % (side_label, idx))
+        if cid in by_id:
+            duplicates.setdefault(cid, []).append(idx)
+        else:
+            by_id[cid] = row
+        ordered_ids.append(cid)
+    if duplicates or len(rows) != len(by_id):
+        dup_list = ", ".join("%r" % k for k in sorted(duplicates))
+        raise ValueError(
+            "Duplicate case_id(s) in %s rows (%d unique across %d rows): %s"
+            % (side_label, len(by_id), len(rows), dup_list)
+        )
+    return ordered_ids, by_id
+
+
 def _compute_paired_heldout_ci(base_rows, ft_rows):
-    """Compute paired bootstrap 95% CIs on immutable case_ids for all-case accuracy."""
+    """Compute paired bootstrap 95% CIs on validated unique case_ids for all-case accuracy.
+
+    Fails closed with ValueError if either side has missing/blank/duplicate case_ids,
+    if len(rows) != len(unique_ids), if compared membership differs between BASE and FT
+    (set(base_ids) != set(ft_ids)), or if per-field eligibility disagrees on a case_id.
+    """
+    base_ids, by_id_base = _validate_paired_row_ids(base_rows, "BASE")
+    ft_ids, by_id_ft = _validate_paired_row_ids(ft_rows, "FT")
+
+    base_set = set(base_ids)
+    ft_set = set(ft_ids)
+    if len(base_rows) != len(base_set) or len(ft_rows) != len(ft_set):
+        raise ValueError(
+            "Paired row count does not match unique case_id count (BASE=%d/%d, FT=%d/%d)"
+            % (len(base_rows), len(base_set), len(ft_rows), len(ft_set))
+        )
+    if base_set != ft_set:
+        only_base = sorted(base_set - ft_set)
+        only_ft = sorted(ft_set - base_set)
+        raise ValueError(
+            "Paired membership mismatch between BASE and FT "
+            "(only_in_base=%r, only_in_ft=%r)" % (only_base[:10], only_ft[:10])
+        )
+
+    shared_ids = list(base_ids)
+    case_ids_sha256 = compute_case_ids_sha256(shared_ids)
+    if len(shared_ids) < 2:
+        return {}
+
     try:
         import variance as _var
     except Exception:
         return {}
-    by_id_base = {r["case_id"]: r for r in base_rows if "case_id" in r}
-    by_id_ft = {r["case_id"]: r for r in ft_rows if "case_id" in r}
-    shared_ids = [r["case_id"] for r in base_rows if r.get("case_id") in by_id_ft]
-    if len(shared_ids) < 2:
-        return {}
-    paired = {"shared_n": len(shared_ids)}
+
+    paired = {
+        "shared_n": len(shared_ids),
+        "case_ids_sha256": case_ids_sha256,
+    }
     for field in ("move", "call", "vol_change", "vs_iv"):
         cand = []
         base = []
         for cid in shared_ids:
             bc = (by_id_base[cid].get("correct") or {}).get(field)
             fc = (by_id_ft[cid].get("correct") or {}).get(field)
-            if bc is None or fc is None:
+            if (bc is None) != (fc is None):
+                raise ValueError(
+                    "Asymmetric field eligibility for case_id %r on field %r (BASE=%r, FT=%r)"
+                    % (cid, field, bc, fc)
+                )
+            if bc is None:
                 continue
             base.append(bool(bc))
             cand.append(bool(fc))
@@ -512,12 +703,6 @@ def _compute_paired_heldout_ci(base_rows, ft_rows):
     return paired
 
 
-def _canonical_sha256(obj):
-    payload = (json.dumps(obj, sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
-    return hashlib.sha256(payload).hexdigest()
-
-
 # ----------------------------------------------------------------------------- TARGET 1: held-out
 def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held-out",
                 model_by_side=None):
@@ -533,25 +718,14 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
     if not os.path.exists(path):
         print("  [%s] SKIP — %s not found (training not finished yet?)" % (label_tag, path))
         return None
-    real_path = os.path.realpath(path)
-    with open(real_path, "rb") as f:
-        raw_bytes = f.read()
-    pre_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-    rows = []
-    for line in raw_bytes.decode("utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
+    real_path, pre_sha256, rows, selected_case_ids, case_ids_sha256 = _load_and_validate_heldout(path, n)
     if not rows:
         print("  [%s] SKIP — file empty" % label_tag)
         return None
-    if n and n < len(rows):
-        # deterministic stride sample for reproducibility
-        step = max(1, len(rows) // n)
-        rows = rows[::step][:n]
-    print("  [%s] %d rows from %s%s" % (
+    print("  [%s] %d rows from %s%s (case_ids_sha256=%s)" % (
         label_tag, len(rows), path,
-        " (production system prompt)" if system_override else ""))
+        " (production system prompt)" if system_override else "",
+        case_ids_sha256[:16]))
 
     base_only = _is_base_only(base_url, ft_url, args)
     sides = [("BASE", base_url)] + ([] if base_only else [("FT", ft_url)])
@@ -574,7 +748,7 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
             user = next((m["content"] for m in msgs if m["role"] == "user"), None)
             gt_raw = next((m["content"] for m in msgs if m["role"] == "assistant"), None)
             gt = extract_json(gt_raw) or {}
-            case_id = _heldout_case_id(row, i, user)
+            case_id = selected_case_ids[i]
 
             if system_override is not None:
                 system = system_override
@@ -758,6 +932,7 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
             "secs": round(secs, 1),
             "model": model,
             "heldout_sha256": pre_sha256,
+            "case_ids_sha256": case_ids_sha256,
         }
 
         print(
@@ -837,6 +1012,8 @@ def run_heldout(base_url, ft_url, n, args, system_override=None, label_tag="held
         "sha256": pre_sha256,
         "post_sha256": post_sha256,
         "intact": (post_sha256 == pre_sha256),
+        "case_count": len(selected_case_ids),
+        "case_ids_sha256": case_ids_sha256,
     }
     if getattr(args, "contract_dir", None) and post_sha256 != pre_sha256:
         import gauntlet_contract as gc
@@ -1285,9 +1462,12 @@ def run_check(c, text, tool_calls=None, *, err=None, finish_reason=None):
 
 
 def score_battery(label, url, battery, system_default, args, *,
-                  model=None, battery_sha256=None):
+                  model=None, battery_sha256=None, battery_name=None):
     """Run one battery's prompts/turns against a URL, score objective checks.
     Returns per-battery aggregate including full failure_census and per-row telemetry."""
+    _item_ids, case_ids_sha256 = validate_battery_items(
+        battery, battery_name=battery_name or label
+    )
     eff_model = model or detect_model(url) or label
     hp = ht = judge_needed = empty = 0
     secs = 0.0
@@ -1410,6 +1590,7 @@ def score_battery(label, url, battery, system_default, args, *,
         "empty": empty,
         "secs": round(secs, 1),
         "n": len(battery),
+        "case_ids_sha256": case_ids_sha256,
         "failure_census": census,
         "rows": rows,
         "model": eff_model,
@@ -1420,14 +1601,16 @@ def score_battery(label, url, battery, system_default, args, *,
 
 
 def load_battery_frozen(name, root=None):
-    """Read a battery JSON file once and return (items, sha256_hex) or (None, None)."""
+    """Read a battery JSON file once, validate unique item IDs, and return (items, sha256_hex)."""
     bdir = os.path.join(root or GG_ROOT, "batteries")
     path = os.path.join(bdir, name + ".json")
     if not os.path.exists(path):
         return None, None
     with open(path, "rb") as f:
         raw = f.read()
-    return json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()
+    items = json.loads(raw.decode("utf-8"))
+    validate_battery_items(items, battery_name=name)
+    return items, hashlib.sha256(raw).hexdigest()
 
 
 def load_battery(name, root=None):
@@ -1443,7 +1626,10 @@ def run_gauntlet(base_url, ft_url, battery_names, args, system_default=None, *,
     if not battery_names:
         print("  [%s] SKIP — no batteries configured for this target" % args.mode)
         return out
-    sides = [("BASE", base_url)] + ([] if base_only else [("FT", ft_url)])
+
+    # Validate every battery's item IDs BEFORE issuing any LLM requests
+    loaded_batteries = []
+    battery_case_digests = {}
     for bn in battery_names:
         if frozen_batteries and bn in frozen_batteries:
             b = frozen_batteries[bn]["items"]
@@ -1453,12 +1639,22 @@ def run_gauntlet(base_url, ft_url, battery_names, args, system_default=None, *,
         if b is None:
             print("  [%s] SKIP battery '%s' — not found in %s" % (args.mode, bn, BATT_DIR))
             continue
+        _ids, b_case_ids_sha = validate_battery_items(b, battery_name=bn)
+        loaded_batteries.append((bn, b, b_sha, b_case_ids_sha))
+        battery_case_digests[bn] = b_case_ids_sha
+
+    if battery_case_digests:
+        out["_battery_case_ids_sha256"] = battery_case_digests
+        out["_case_ids_sha256"] = _canonical_sha256(battery_case_digests)
+
+    sides = [("BASE", base_url)] + ([] if base_only else [("FT", ft_url)])
+    for bn, b, b_sha, _b_case_ids_sha in loaded_batteries:
         print("  -- battery %s (%d items) --" % (bn, len(b)))
         for label, url in sides:
             eff_model = (model_by_side or {}).get(label)
             out[label][bn] = score_battery(
                 label, url, b, system_default, args,
-                model=eff_model, battery_sha256=b_sha,
+                model=eff_model, battery_sha256=b_sha, battery_name=bn,
             )
             r = out[label][bn]
             fc = r["failure_census"]
@@ -1585,6 +1781,9 @@ def _finalize_verified_contracts(prepared, results):
             "profile": profile,
             "manifest_sha256": verified_run["manifest_sha256"],
             "battery_set_sha256": verified_run["battery_set_sha256"],
+            "case_ids_sha256": _canonical_sha256(
+                {e["name"]: e["case_ids_sha256"] for e in verified_run["batteries"]}
+            ),
             "run_manifest": str(run_path),
             "completion_receipt": str(comp_path),
             "verified": True,
@@ -1610,7 +1809,8 @@ def _write_blind_judge_packets(results, args, frozen_batteries=None):
                     batt_list = frozen_batteries[bn]["items"]
                 else:
                     batt_list = load_battery(bn) or []
-                batt_items = {it["id"]: it for it in batt_list}
+                validate_battery_items(batt_list, battery_name=bn)
+                batt_items = {str(it["id"]): it for it in batt_list}
                 model = bres.get("model") or side
                 for row in bres.get("rows", []):
                     it = batt_items.get(row["id"], {})
@@ -1728,6 +1928,9 @@ def report(results, args):
             print("  %-22s %12s" % ("dir_acc_parsed", pct(b.get("dir_acc_parsed"))))
             print("  failure census: attempted=%d succeeded=%d failed=%d (%s)" % (
                 bc["attempted"], bc["succeeded"], bc["failed"], _fmt_census_reasons(bc)))
+            if b.get("case_ids_sha256"):
+                print("  case identity: n=%d case_ids_sha256=%s" % (
+                    b.get("n", bc["attempted"]), b["case_ids_sha256"][:16]))
             if "ppl" in b and b["ppl"].get("loss") is not None:
                 print("  %-22s %12.4f" % ("answer_loss", b["ppl"]["loss"]))
                 print("  %-22s %12.3f" % ("answer_ppl", b["ppl"]["ppl"]))
@@ -1799,6 +2002,10 @@ def report(results, args):
                 bc["succeeded"], bc["attempted"], pct(bc["coverage_rate"]), bc["failed"], _fmt_census_reasons(bc)))
             print("  failure census FT  : %d/%d succeeded (%s), failed=%d (%s)" % (
                 fc["succeeded"], fc["attempted"], pct(fc["coverage_rate"]), fc["failed"], _fmt_census_reasons(fc)))
+            paired_digest = paired.get("case_ids_sha256") or b.get("case_ids_sha256")
+            if paired_digest:
+                print("  case identity: n=%d case_ids_sha256=%s" % (
+                    paired.get("shared_n", b.get("n", bc["attempted"])), paired_digest[:16]))
 
             # perplexity
             if "ppl" in b and "ppl" in f:
@@ -2090,6 +2297,26 @@ def main(argv=None):
         with open(sysdefault_path, encoding="utf-8") as f:
             sysdefault = f.read()
 
+    trading_bats = get_trading_batteries(GG_ROOT)
+    general_bats = get_general_batteries(GG_ROOT, trading_batteries=trading_bats)
+
+    planned_gauntlet_bats = []
+    if args.mode in ("trading-gauntlet", "all"):
+        planned_gauntlet_bats.extend(trading_bats)
+    if args.mode in ("gordon", "all"):
+        planned_gauntlet_bats.extend(general_bats)
+    planned_gauntlet_bats = sorted(set(planned_gauntlet_bats))
+
+    # Pre-flight validation BEFORE any network / model calls:
+    # duplicate explicit case IDs or battery item IDs must fail closed immediately.
+    if args.mode in ("held-out", "all") and os.path.exists(args.heldout):
+        _load_and_validate_heldout(args.heldout, args.n)
+    preloaded_batteries = {}
+    for bn in planned_gauntlet_bats:
+        items, b_sha = load_battery_frozen(bn)
+        if items is not None:
+            preloaded_batteries[bn] = {"items": items, "sha256": b_sha}
+
     detected_base = detect_model(args.base_url)
     detected_ft = None if base_only else detect_model(ft_url)
     model_by_side = {"BASE": detected_base or "BASE"}
@@ -2103,16 +2330,6 @@ def main(argv=None):
         print("FT   url:", ft_url, "| model:", detected_ft)
     print("Gauntlet root:", GG_ROOT)
 
-    trading_bats = get_trading_batteries(GG_ROOT)
-    general_bats = get_general_batteries(GG_ROOT, trading_batteries=trading_bats)
-
-    planned_gauntlet_bats = []
-    if args.mode in ("trading-gauntlet", "all"):
-        planned_gauntlet_bats.extend(trading_bats)
-    if args.mode in ("gordon", "all"):
-        planned_gauntlet_bats.extend(general_bats)
-    planned_gauntlet_bats = sorted(set(planned_gauntlet_bats))
-
     # Freeze battery bytes (and run contracts if --contract-dir) BEFORE any model calls
     prepared_contracts = None
     frozen_batteries = {}
@@ -2124,10 +2341,7 @@ def main(argv=None):
         if prepared_contracts["frozen_system_text"] is not None:
             sysdefault = prepared_contracts["frozen_system_text"]
     else:
-        for bn in planned_gauntlet_bats:
-            items, b_sha = load_battery_frozen(bn)
-            if items is not None:
-                frozen_batteries[bn] = {"items": items, "sha256": b_sha}
+        frozen_batteries = preloaded_batteries
 
     results = {}
     if args.mode in ("held-out", "all"):
@@ -2162,6 +2376,30 @@ def main(argv=None):
         results["_blind_judge"] = _write_blind_judge_packets(
             results, args, frozen_batteries=frozen_batteries
         )
+
+    case_identity = {}
+    for target in ("held-out", "skew"):
+        t_res = results.get(target)
+        if isinstance(t_res, dict) and isinstance(t_res.get("_provenance"), dict):
+            prov = t_res["_provenance"]
+            if prov.get("case_ids_sha256"):
+                case_identity[target] = {
+                    "case_count": prov.get("case_count"),
+                    "case_ids_sha256": prov["case_ids_sha256"],
+                }
+    for target in ("trading-gauntlet", "gordon"):
+        t_res = results.get(target)
+        if isinstance(t_res, dict) and t_res.get("_battery_case_ids_sha256"):
+            case_identity[target] = {
+                "case_ids_sha256": t_res["_case_ids_sha256"],
+                "batteries": dict(t_res["_battery_case_ids_sha256"]),
+            }
+    results["_manifest"] = {
+        "mode": args.mode,
+        "base_only": base_only,
+        "case_ids_sha256": _canonical_sha256(case_identity) if case_identity else None,
+        "targets": case_identity,
+    }
 
     # save raw answers for in-session / local-judge grading of llm_judge items
     out_parent = os.path.dirname(os.path.abspath(args.out))

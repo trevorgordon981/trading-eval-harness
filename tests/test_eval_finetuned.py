@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for eval_finetuned.py covering EV01, EV02, EV04, EV05, EV07, EV08, EV09."""
+"""Regression tests for eval_finetuned.py covering EV01, EV02, EV04, EV05, EV07, EV08, EV09, EV10."""
 
 import hashlib
 import io
@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -748,6 +749,318 @@ class TestEV09HeldoutSchemaValidation(unittest.TestCase):
             self.assertEqual(b["valid_coverage"], 0.0)
             self.assertEqual(b["move_acc"], 0.0)
             self.assertEqual(b["failure_census"]["by_reason"]["truncated"], 2)
+
+
+class TestEV10UniqueCaseIdsAndPairedMembership(unittest.TestCase):
+    """EV10: Duplicate explicit case IDs and mismatched paired membership MUST fail closed."""
+
+    def _make_duplicate_id_heldout(self, path, n=10, shared_id="dup_case"):
+        """Create n unique prompts that all share the same explicit duplicate ID (exact EV10 fixture)."""
+        moves = ["QUIET", "NORMAL", "ELEVATED", "EXPLOSIVE"]
+        calls = ["UP", "DOWN", "NEUTRAL"]
+        vols = ["EXPANDING", "STABLE", "CONTRACTING"]
+        vsivs = ["RICH", "FAIR", "CHEAP"]
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(n):
+                gt = {
+                    "move": moves[i % len(moves)],
+                    "call": calls[i % len(calls)],
+                    "vol_change": vols[i % len(vols)],
+                    "vs_iv": vsivs[i % len(vsivs)],
+                    "exp_move_pct": float(2 + i),
+                    "conviction": 8,
+                }
+                row = {
+                    "id": shared_id,
+                    "messages": [
+                        {"role": "system", "content": "Return JSON only."},
+                        {"role": "user", "content": "UNIQUE_PROMPT_%02d market snapshot" % i},
+                        {"role": "assistant", "content": json.dumps(gt)},
+                    ],
+                }
+                f.write(json.dumps(row) + "\n")
+
+    def test_ev10_duplicate_explicit_ids_fail_closed_before_any_llm_request(self):
+        """Exact EV10 counterexample: 10 unique prompts sharing 1 explicit ID MUST fail closed
+        before issuing ANY LLM/HTTP request (both in-process and CLI subprocess)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            heldout = os.path.join(tmp, "dup_heldout10.jsonl")
+            self._make_duplicate_id_heldout(heldout, n=10, shared_id="same_id")
+            out_json = os.path.join(tmp, "dup_out.json")
+
+            requests_seen = {"base": 0, "ft": 0}
+
+            def base_responder(body):
+                requests_seen["base"] += 1
+                return _chat_resp(json.dumps({
+                    "move": "QUIET", "call": "UP", "vol_change": "EXPANDING",
+                    "vs_iv": "RICH", "exp_move_pct": 2.0, "conviction": 8,
+                }))
+
+            def ft_responder(body):
+                requests_seen["ft"] += 1
+                return _chat_resp(json.dumps({
+                    "move": "EXPLOSIVE", "call": "DOWN", "vol_change": "CONTRACTING",
+                    "vs_iv": "CHEAP", "exp_move_pct": 9.0, "conviction": 8,
+                }))
+
+            b_srv, b_url = _start_server(base_responder, "base-m")
+            f_srv, f_url = _start_server(ft_responder, "ft-m")
+            try:
+                # 1. In-process main() must raise ValueError before issuing any request
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(ValueError) as ctx:
+                        ef.main([
+                            "--base-url", b_url,
+                            "--ft-url", f_url,
+                            "--mode", "held-out",
+                            "--heldout", heldout,
+                            "--out", out_json,
+                        ])
+                self.assertIn("Duplicate case_id", str(ctx.exception))
+                self.assertIn("same_id", str(ctx.exception))
+                self.assertEqual(requests_seen["base"], 0)
+                self.assertEqual(requests_seen["ft"], 0)
+                self.assertFalse(os.path.exists(out_json))
+
+                # 2. Subprocess CLI must exit nonzero before issuing any request
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        os.path.join(REPO_ROOT, "eval_finetuned.py"),
+                        "--base-url", b_url,
+                        "--ft-url", f_url,
+                        "--mode", "held-out",
+                        "--heldout", heldout,
+                        "--out", out_json,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("Duplicate case_id", proc.stderr)
+                self.assertEqual(requests_seen["base"], 0)
+                self.assertEqual(requests_seen["ft"], 0)
+            finally:
+                b_srv.shutdown(); b_srv.server_close()
+                f_srv.shutdown(); f_srv.server_close()
+
+    def test_ev10_duplicate_id_detected_even_under_stride_subsampling(self):
+        """Duplicate explicit IDs in the held-out file fail closed even if --n would skip one copy."""
+        with tempfile.TemporaryDirectory() as tmp:
+            heldout = os.path.join(tmp, "dup_stride.jsonl")
+            with open(heldout, "w", encoding="utf-8") as f:
+                for i in range(10):
+                    gt = {
+                        "move": "QUIET", "call": "UP", "vol_change": "STABLE",
+                        "vs_iv": "FAIR", "exp_move_pct": 2.0, "conviction": 6,
+                    }
+                    cid = "colliding_id" if i in (0, 1) else ("unique_%02d" % i)
+                    row = {
+                        "id": cid,
+                        "messages": [
+                            {"role": "system", "content": "Return JSON only."},
+                            {"role": "user", "content": "PROMPT_%02d" % i},
+                            {"role": "assistant", "content": json.dumps(gt)},
+                        ],
+                    }
+                    f.write(json.dumps(row) + "\n")
+
+            chat_calls = {"n": 0}
+
+            def counting_chat(*a, **kw):
+                chat_calls["n"] += 1
+                return "{}", 1, "stop", [], None
+
+            with patch.object(ef, "chat_text", counting_chat), \
+                 patch.object(ef, "detect_model", return_value="m"), \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaises(ValueError):
+                    ef.main([
+                        "--base-url", "http://127.0.0.1:1/v1/chat/completions",
+                        "--mode", "held-out",
+                        "--n", "5",
+                        "--heldout", heldout,
+                        "--out", os.path.join(tmp, "out.json"),
+                    ])
+            self.assertEqual(chat_calls["n"], 0)
+
+    def test_ev10_paired_ci_helper_rejects_duplicate_and_mismatched_rows_directly(self):
+        """Direct Python calls to _compute_paired_heldout_ci MUST reject EV10 duplicate rows
+        (90% BASE vs 10% FT all with same case_id) and mismatched membership."""
+        # Exact EV10 counterexample: 9 BASE-only wins + 1 FT-only win, all sharing case_id='dup'
+        dup_base = []
+        dup_ft = []
+        for i in range(10):
+            base_ok = (i < 9)
+            ft_ok = (i == 9)
+            dup_base.append({
+                "case_id": "dup",
+                "correct": {"move": base_ok, "call": base_ok, "vol_change": base_ok, "vs_iv": base_ok},
+            })
+            dup_ft.append({
+                "case_id": "dup",
+                "correct": {"move": ft_ok, "call": ft_ok, "vol_change": ft_ok, "vs_iv": ft_ok},
+            })
+        with self.assertRaises(ValueError) as ctx:
+            ef._compute_paired_heldout_ci(dup_base, dup_ft)
+        self.assertIn("Duplicate case_id", str(ctx.exception))
+
+        # Duplicate on FT side only (len(ft_rows) != len(ft_ids))
+        base_ok_rows = [
+            {"case_id": "c1", "correct": {"move": True, "call": True, "vol_change": True, "vs_iv": True}},
+            {"case_id": "c2", "correct": {"move": False, "call": False, "vol_change": False, "vs_iv": False}},
+        ]
+        ft_dup_rows = [
+            {"case_id": "c1", "correct": {"move": True, "call": True, "vol_change": True, "vs_iv": True}},
+            {"case_id": "c2", "correct": {"move": True, "call": True, "vol_change": True, "vs_iv": True}},
+            {"case_id": "c2", "correct": {"move": False, "call": False, "vol_change": False, "vs_iv": False}},
+        ]
+        with self.assertRaises(ValueError):
+            ef._compute_paired_heldout_ci(base_ok_rows, ft_dup_rows)
+
+        # Mismatched membership (same length, different ID sets)
+        ft_mismatch = [
+            {"case_id": "c1", "correct": {"move": True, "call": True, "vol_change": True, "vs_iv": True}},
+            {"case_id": "c3", "correct": {"move": True, "call": True, "vol_change": True, "vs_iv": True}},
+        ]
+        with self.assertRaises(ValueError) as mm_ctx:
+            ef._compute_paired_heldout_ci(base_ok_rows, ft_mismatch)
+        self.assertIn("membership mismatch", str(mm_ctx.exception))
+
+        # Subset mismatch (FT missing c2)
+        with self.assertRaises(ValueError):
+            ef._compute_paired_heldout_ci(base_ok_rows, [ft_mismatch[0]])
+
+        # Missing or blank case_id rejected
+        with self.assertRaises(ValueError):
+            ef._compute_paired_heldout_ci(
+                [{"correct": {"move": True}}, base_ok_rows[1]],
+                base_ok_rows,
+            )
+        with self.assertRaises(ValueError):
+            ef._compute_paired_heldout_ci(
+                [{"case_id": "   ", "correct": {"move": True}}, base_ok_rows[1]],
+                base_ok_rows,
+            )
+
+        # Valid unique rows (even if FT order differs) succeed with exact delta and case_ids_sha256
+        ft_reordered = [
+            {"case_id": "c2", "correct": {"move": True, "call": False, "vol_change": False, "vs_iv": False}},
+            {"case_id": "c1", "correct": {"move": True, "call": True, "vol_change": True, "vs_iv": True}},
+        ]
+        paired = ef._compute_paired_heldout_ci(base_ok_rows, ft_reordered)
+        self.assertEqual(paired["shared_n"], 2)
+        self.assertAlmostEqual(paired["move"]["delta"], 0.5)
+        self.assertEqual(paired["case_ids_sha256"], ef.compute_case_ids_sha256(["c1", "c2"]))
+
+    def test_ev10_duplicate_battery_item_ids_fail_closed_before_llm_requests(self):
+        """Duplicate battery item IDs fail closed without --contract-dir and in score_battery()."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            bdir = root / "batteries"
+            bdir.mkdir()
+            dup_items = [
+                {"id": "dup_item", "prompt": "First prompt", "checks": [{"type": "non_empty"}]},
+                {"id": "dup_item", "prompt": "Second prompt", "checks": [{"type": "non_empty"}]},
+            ]
+            (bdir / "general_reasoning.json").write_text(json.dumps(dup_items), encoding="utf-8")
+            (root / "battery_manifest.json").write_text(
+                json.dumps({
+                    "schema": "gordon-battery-manifest.v1",
+                    "profiles": {"general": ["general_reasoning"]},
+                }),
+                encoding="utf-8",
+            )
+
+            chat_calls = {"n": 0}
+
+            def counting_chat(*a, **kw):
+                chat_calls["n"] += 1
+                return "ok", 2, "stop", [], None
+
+            # 1. CLI / main() without --contract-dir fails closed with zero LLM calls
+            with patch.object(ef, "GG_ROOT", str(root)), \
+                 patch.object(ef, "BATT_DIR", str(bdir)), \
+                 patch.object(ef, "detect_model", return_value="fixture"), \
+                 patch.object(ef, "chat_text", counting_chat), \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaises(ValueError) as ctx:
+                    ef.main([
+                        "--base-url", "http://127.0.0.1:1/v1/chat/completions",
+                        "--mode", "gordon",
+                        "--out", str(root / "out.json"),
+                    ])
+            self.assertIn("Duplicate item id", str(ctx.exception))
+            self.assertEqual(chat_calls["n"], 0)
+
+            # 2. Direct score_battery() call fails closed before any LLM request
+            dummy_args = type("A", (), {"timeout": 10, "verbose": False})()
+            with patch.object(ef, "chat_text", counting_chat):
+                with self.assertRaises(ValueError):
+                    ef.score_battery(
+                        "BASE", "http://127.0.0.1:1/v1/chat/completions",
+                        dup_items, None, dummy_args, model="fixture",
+                    )
+            self.assertEqual(chat_calls["n"], 0)
+
+    def test_case_ids_sha256_present_and_deterministic_in_summary_and_manifest(self):
+        """Clean held-out + gauntlet runs emit deterministic case_ids_sha256 digests everywhere."""
+        with tempfile.TemporaryDirectory() as tmp:
+            heldout = os.path.join(tmp, "heldout4.jsonl")
+            _make_heldout_file(heldout, n=4)
+            expected_ho_sha = ef.compute_case_ids_sha256(
+                ["synth_00", "synth_01", "synth_02", "synth_03"]
+            )
+            valid_json = json.dumps({
+                "move": "QUIET", "call": "UP", "vol_change": "EXPANDING",
+                "vs_iv": "RICH", "exp_move_pct": 2.0, "conviction": 8,
+            })
+
+            def fake_chat(url, messages, **kw):
+                return valid_json, 12, "stop", [], None
+
+            with patch.object(ef, "detect_model", return_value="fixture"), \
+                 patch.object(ef, "chat_text", fake_chat), \
+                 redirect_stdout(io.StringIO()) as buf:
+                r1 = ef.main([
+                    "--base-url", "http://127.0.0.1:1/v1/chat/completions",
+                    "--ft-url", "http://127.0.0.1:2/v1/chat/completions",
+                    "--mode", "all",
+                    "--heldout", heldout,
+                    "--out", os.path.join(tmp, "r1.json"),
+                ])
+                out_text = buf.getvalue()
+            with patch.object(ef, "detect_model", return_value="fixture"), \
+                 patch.object(ef, "chat_text", fake_chat), \
+                 redirect_stdout(io.StringIO()):
+                r2 = ef.main([
+                    "--base-url", "http://127.0.0.1:1/v1/chat/completions",
+                    "--ft-url", "http://127.0.0.1:2/v1/chat/completions",
+                    "--mode", "all",
+                    "--heldout", heldout,
+                    "--out", os.path.join(tmp, "r2.json"),
+                ])
+
+            ho = r1["held-out"]
+            self.assertEqual(ho["_provenance"]["case_ids_sha256"], expected_ho_sha)
+            self.assertEqual(ho["_provenance"]["case_count"], 4)
+            self.assertEqual(ho["BASE"]["case_ids_sha256"], expected_ho_sha)
+            self.assertEqual(ho["FT"]["case_ids_sha256"], expected_ho_sha)
+            self.assertEqual(ho["_paired"]["case_ids_sha256"], expected_ho_sha)
+            self.assertIn(expected_ho_sha[:16], out_text)
+
+            # Top-level manifest digest is deterministic across runs
+            self.assertRegex(r1["_manifest"]["case_ids_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(r1["_manifest"]["case_ids_sha256"], r2["_manifest"]["case_ids_sha256"])
+            self.assertEqual(r1["_manifest"]["targets"]["held-out"]["case_ids_sha256"], expected_ho_sha)
+            for tag in ("trading-gauntlet", "gordon"):
+                self.assertRegex(r1[tag]["_case_ids_sha256"], r"^[0-9a-f]{64}$")
+                for bn, bres in r1[tag]["BASE"].items():
+                    self.assertEqual(
+                        bres["case_ids_sha256"],
+                        r1[tag]["_battery_case_ids_sha256"][bn],
+                    )
 
 
 if __name__ == "__main__":
