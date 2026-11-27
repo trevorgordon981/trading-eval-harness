@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Create and verify immutable Gordon Gauntlet run contracts.
+"""Create and verify hash-bound (SHA-256) Gordon Gauntlet run contracts.
 
 The runner, evaluator, reporter, protocol fingerprinter, and promotion pipeline
-all consume the same profile from ``battery_manifest.json``.  A run is complete
-only when every result validates against the frozen contract and a completion
-receipt binds the exact result bytes.
+consume the same profile from ``battery_manifest.json``.  A run is complete
+only when every result validates against the frozen hash-bound contract and a
+completion receipt binds the exact result bytes via SHA-256.
+
+Note: contracts provide tamper-evident SHA-256 content binding rather than
+public-key cryptographic signatures.
 """
 
 from __future__ import annotations
@@ -227,30 +230,48 @@ def load_profile(root: Path, profile: str) -> tuple[str, list[dict[str, Any]], s
     if manifest.get("schema") != MANIFEST_SCHEMA or not isinstance(manifest.get("profiles"), dict):
         raise ContractError("battery manifest schema/profiles are invalid")
     profiles = manifest["profiles"]
-    if set(profiles) != {"standard", "heavy"}:
-        raise ContractError("battery manifest must define exactly standard and heavy")
+    if not profiles:
+        raise ContractError("battery manifest must define at least one profile")
+    for prof_name, prof_batteries in profiles.items():
+        _token(prof_name, "profile name")
+        if not isinstance(prof_batteries, list) or not prof_batteries:
+            raise ContractError(f"profile {prof_name} must be a non-empty list")
+        prof_checked = [_token(name, "battery name") for name in prof_batteries]
+        if prof_checked != sorted(prof_checked) or len(prof_checked) != len(set(prof_checked)):
+            raise ContractError(f"profile {prof_name} must be sorted and unique")
     names = profiles.get(profile)
     if not isinstance(names, list) or not names:
         raise ContractError(f"unknown or empty battery profile: {profile}")
     checked = [_token(name, "battery name") for name in names]
-    if checked != sorted(checked) or len(checked) != len(set(checked)):
-        raise ContractError(f"profile {profile} must be sorted and unique")
     entries = [_battery_entry(root, name) for name in checked]
     battery_set_sha = canonical_sha({"profile": profile, "batteries": entries})
     return hashlib.sha256(raw).hexdigest(), entries, battery_set_sha
 
 
-def create_run(args: argparse.Namespace) -> None:
-    root = Path(args.root).expanduser().absolute()
-    label = _token(args.label, "label")
-    model_id = _token(args.model_id, "model id")
-    endpoint = _endpoint(args.endpoint)
-    profile = _token(args.profile, "profile")
+def create_run_manifest(
+    root: Path,
+    *,
+    profile: str,
+    label: str,
+    endpoint: str,
+    model_id: str,
+    out_path: Path,
+    system: str = "none",
+    thinking: str | None = None,
+    max_tokens: int | None = None,
+    timeout: int = 240,
+) -> dict[str, Any]:
+    """Create a canonical hash-bound run manifest atomically and return its dict."""
+    root = Path(root).expanduser().absolute()
+    label = _token(label, "label")
+    model_id = _token(model_id, "model id")
+    endpoint = _endpoint(endpoint)
+    profile = _token(profile, "profile")
     manifest_sha, batteries, battery_set_sha = load_profile(root, profile)
-    system: dict[str, Any] | None = None
-    if args.system != "none":
-        system_path = _safe_existing(Path(args.system).expanduser().absolute(), "system prompt")
-        system = {
+    sys_receipt: dict[str, Any] | None = None
+    if system and system != "none":
+        system_path = _safe_existing(Path(system).expanduser().absolute(), "system prompt")
+        sys_receipt = {
             "path": str(system_path),
             "size": system_path.stat().st_size,
             "sha256": sha256_file(system_path, "system prompt"),
@@ -265,16 +286,109 @@ def create_run(args: argparse.Namespace) -> None:
         "profile": profile,
         "manifest_sha256": manifest_sha,
         "battery_set_sha256": battery_set_sha,
-        "system": system,
+        "system": sys_receipt,
         "generation": {
             "temperature": 0.0,
-            "thinking": args.thinking,
-            "max_tokens_override": args.max_tokens,
-            "timeout_seconds": args.timeout,
+            "thinking": thinking,
+            "max_tokens_override": max_tokens,
+            "timeout_seconds": timeout,
         },
         "batteries": batteries,
     }
-    _atomic_create(Path(args.out).expanduser().absolute(), value)
+    _atomic_create(Path(out_path).expanduser().absolute(), value)
+    return value
+
+
+def write_battery_result_v2(
+    run: dict[str, Any],
+    battery_name: str,
+    rows: list[dict[str, Any]],
+    out_path: Path,
+) -> dict[str, Any]:
+    """Serialize battery rows into the exact gordon-result.v2 contract schema."""
+    battery_name = _token(battery_name, "battery name")
+    entry = next((item for item in run["batteries"] if item["name"] == battery_name), None)
+    if entry is None:
+        raise ContractError(f"battery {battery_name} is not in the run contract")
+    formatted_rows: list[dict[str, Any]] = []
+    for row in rows:
+        sec = float(row.get("sec", row.get("secs", 0.0)))
+        ctok = int(row.get("ctok", row.get("completion_tokens", 0)))
+        tps = round(ctok / sec, 2) if sec > 0 else 0.0
+        item: dict[str, Any] = {
+            "id": str(row["id"]),
+            "sec": sec,
+            "finish": row.get("finish", row.get("finish_reason")),
+            "ctok": ctok,
+            "tps": tps,
+            "tool_calls": bool(row.get("tool_calls")),
+            "err": row.get("err"),
+            "text": str(row.get("text") or ""),
+        }
+        if "transcript" in row:
+            item["transcript"] = row["transcript"]
+        formatted_rows.append(item)
+    payload = {
+        "schema": RESULT_SCHEMA,
+        "run_id": run["run_id"],
+        "label": run["label"],
+        "endpoint": run["endpoint"],
+        "model_id": run["model_id"],
+        "battery": f"{battery_name}.json",
+        "battery_sha256": entry["sha256"],
+        "battery_version": entry["version"],
+        "battery_set_sha256": run["battery_set_sha256"],
+        "system_sha256": None if run["system"] is None else run["system"]["sha256"],
+        "generation": run["generation"],
+        "results": formatted_rows,
+    }
+    dest = Path(out_path).expanduser().absolute()
+    _atomic_create(dest, payload)
+    return validate_result(run, dest, battery_name)
+
+
+def complete_run_manifest(
+    root: Path,
+    run_path: Path,
+    results_dir: Path,
+    out_path: Path,
+) -> dict[str, Any]:
+    """Validate every battery result and atomically emit a completion receipt."""
+    root = Path(root).expanduser().absolute()
+    run_path = Path(run_path).expanduser().absolute()
+    run, raw = load_run(run_path, root=root, revalidate_inputs=True)
+    res_dir = _safe_existing(Path(results_dir).expanduser().absolute(),
+                             "results directory", directory=True)
+    results = []
+    for entry in run["batteries"]:
+        path = res_dir / f"{entry['name']}.{run['label']}.json"
+        validate_result(run, path, entry["name"])
+        results.append({"battery": entry["name"], "sha256": sha256_file(path, "result")})
+    value = {
+        "schema": COMPLETION_SCHEMA,
+        "run_id": run["run_id"],
+        "label": run["label"],
+        "run_manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "battery_set_sha256": run["battery_set_sha256"],
+        "results": results,
+    }
+    _atomic_create(Path(out_path).expanduser().absolute(), value)
+    return value
+
+
+def create_run(args: argparse.Namespace) -> None:
+    value = create_run_manifest(
+        Path(args.root),
+        profile=args.profile,
+        label=args.label,
+        endpoint=args.endpoint,
+        model_id=args.model_id,
+        out_path=Path(args.out),
+        system=args.system,
+        thinking=args.thinking,
+        max_tokens=args.max_tokens,
+        timeout=args.timeout,
+    )
     print(value["run_id"])
 
 
@@ -385,26 +499,13 @@ def validate_result(run: dict[str, Any], result_path: Path, battery_name: str) -
 
 
 def complete_run(args: argparse.Namespace) -> None:
-    root = Path(args.root).expanduser().absolute()
-    run_path = Path(args.run_manifest).expanduser().absolute()
-    run, raw = load_run(run_path, root=root, revalidate_inputs=True)
-    results_dir = _safe_existing(Path(args.results_dir).expanduser().absolute(),
-                                 "results directory", directory=True)
-    results = []
-    for entry in run["batteries"]:
-        path = results_dir / f"{entry['name']}.{run['label']}.json"
-        validate_result(run, path, entry["name"])
-        results.append({"battery": entry["name"], "sha256": sha256_file(path, "result")})
-    value = {
-        "schema": COMPLETION_SCHEMA,
-        "run_id": run["run_id"],
-        "label": run["label"],
-        "run_manifest_sha256": hashlib.sha256(raw).hexdigest(),
-        "battery_set_sha256": run["battery_set_sha256"],
-        "results": results,
-    }
-    _atomic_create(Path(args.out).expanduser().absolute(), value)
-    print(run["run_id"])
+    value = complete_run_manifest(
+        Path(args.root),
+        Path(args.run_manifest),
+        Path(args.results_dir),
+        Path(args.out),
+    )
+    print(value["run_id"])
 
 
 def verify_complete(root: Path, run_path: Path, completion_path: Path,
@@ -466,11 +567,11 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     ls = sub.add_parser("list")
     ls.add_argument("--root", required=True)
-    ls.add_argument("--profile", default="standard", choices=("standard", "heavy"))
+    ls.add_argument("--profile", default="standard")
     ls.set_defaults(func=list_cmd)
     create = sub.add_parser("create-run")
     create.add_argument("--root", required=True)
-    create.add_argument("--profile", default="standard", choices=("standard", "heavy"))
+    create.add_argument("--profile", default="standard")
     create.add_argument("--label", required=True)
     create.add_argument("--endpoint", required=True)
     create.add_argument("--model-id", required=True)

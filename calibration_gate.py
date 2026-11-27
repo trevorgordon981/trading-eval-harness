@@ -11,7 +11,7 @@ high conviction earns real P&L on LIVE exitmgr trades)
     * observed accuracy per bin  vs  the confidence that bin implies
     * ECE (expected calibration error) and MCE (max calibration error)
     * a discrimination gate: high-conviction calls must be MEANINGFULLY more
-      accurate than low-conviction ones (the thing Trevor actually wants gated)
+      accurate than low-conviction ones (the core property downstream sizing needs)
     * PASS / FAIL / INSUFFICIENT verdict
 
   Conviction 1..10 is treated as an implied probability-correct = conviction/10
@@ -88,18 +88,29 @@ MIN_TOTAL = 30            # min scored predictions to render a verdict
 MIN_PER_GROUP = 8         # min in BOTH the high and low conviction groups
 MIN_LIFT = 0.10           # high-group acc must exceed low-group acc by >= this
 MAX_ECE = 0.15            # calibration error above this is flagged (soft gate)
-LOW_HI, HI_LO = 4, 8      # low group = conviction<=4 ; high group = conviction>=8
+LOW_HI, HI_LO = 4, 8      # legacy 1..10 equivalents of LOW_MAX_PROB / HIGH_MIN_PROB
+LOW_MAX_PROB = 0.4        # normalized confidence <= 0.40 -> low group
+HIGH_MIN_PROB = 0.8       # normalized confidence >= 0.80 -> high group
 
 
 def _correct_from_record(rec, field):
     """Return (conviction_float_or_None, correct_bool_or_None)."""
+    if not isinstance(rec, dict):
+        return None, None
+    # Skip explicitly unparsed / failed held-out rows
+    if rec.get("parsed") is False or rec.get("err"):
+        return None, None
     conv = rec.get("conviction")
     if conv is None and isinstance(rec.get("pred"), dict):
         conv = rec["pred"].get("conviction")
     conv = to_float(conv)
 
     if "correct" in rec:
-        return conv, bool(rec["correct"])
+        cval = rec["correct"]
+        if isinstance(cval, dict):
+            val = cval.get(field)
+            return conv, (None if val is None else bool(val))
+        return conv, bool(cval)
 
     # derive correctness from pred/gt
     pred, gt = rec.get("pred"), rec.get("gt")
@@ -118,16 +129,11 @@ def _correct_from_record(rec, field):
     return conv, None
 
 
-def load_pairs(path, field="call", label=None):
-    """Return list of (conviction, correct_bool) from either input shape."""
-    with open(path) as f:
-        head = f.read().lstrip()
-    if head.startswith("["):
-        data = json.loads(head)
-        records = data
-    elif head.startswith("{"):
-        data = json.loads(head)
-        # results-JSON shape: dig for objects that carry rows[]
+def _extract_records_from_obj(data, label=None):
+    """Extract flat prediction records from a parsed JSON object or list."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
         recs = []
 
         def walk(d, lbl):
@@ -138,10 +144,43 @@ def load_pairs(path, field="call", label=None):
                 else:
                     for k, v in d.items():
                         walk(v, k)
+
         walk(data, None)
-        records = recs if recs else ([data] if "conviction" in data else [])
-    else:  # jsonl
-        records = [json.loads(l) for l in head.splitlines() if l.strip()]
+        if recs:
+            return recs
+        if "conviction" in data or "pred" in data:
+            return [data]
+    return []
+
+
+def load_pairs(path, field="call", label=None):
+    """Return list of (conviction, correct_bool) from JSON or JSONL input."""
+    with open(path, encoding="utf-8") as f:
+        raw = f.read()
+    stripped = raw.strip()
+    if not stripped:
+        return []
+
+    records = []
+    if str(path).lower().endswith(".jsonl"):
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            records.extend(_extract_records_from_obj(obj, label=label))
+    else:
+        try:
+            data = json.loads(stripped)
+            records = _extract_records_from_obj(data, label=label)
+        except json.JSONDecodeError:
+            # Strict JSON-then-JSONL fallback (handles multi-line JSONL regardless of extension)
+            for line in stripped.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                records.extend(_extract_records_from_obj(obj, label=label))
 
     pairs = []
     for rec in records:
@@ -153,16 +192,21 @@ def load_pairs(path, field="call", label=None):
 
 # ------------------------------------------------------------- reliability math
 def reliability(pairs, conf_scale=10.0):
-    """Compute per-value bins, grouped bins, ECE, MCE.
+    """Compute per-value bins, normalized grouped bins, ECE, MCE.
 
-    conf implied by conviction = conviction / conf_scale (default 10 -> 0..1).
+    Confidence is normalized as prob = conviction / conf_scale (default 10 -> 0..1)
+    BEFORE grouping into low (prob <= 0.4), mid (0.4 < prob < 0.8), high (prob >= 0.8).
     """
+    if conf_scale <= 0:
+        raise ValueError("conf_scale must be > 0")
     n = len(pairs)
-    # per stated-conviction-value reliability
     from collections import defaultdict
     byval = defaultdict(list)
+    norm_pairs = []
     for c, ok in pairs:
+        prob = c / conf_scale
         byval[c].append(ok)
+        norm_pairs.append((prob, bool(ok)))
     per_value = {}
     ece = mce = 0.0
     for c in sorted(byval):
@@ -171,26 +215,43 @@ def reliability(pairs, conf_scale=10.0):
         conf = c / conf_scale
         gap = abs(acc - conf)
         per_value[c] = {"n": len(oks), "acc": acc, "conf": conf, "gap": gap}
-        ece += (len(oks) / n) * gap
+        if n:
+            ece += (len(oks) / n) * gap
         mce = max(mce, gap)
 
-    def _grp(pred):
-        oks = [ok for c, ok in pairs if pred(c)]
-        return {"n": len(oks), "acc": (sum(oks) / len(oks)) if oks else None}
+    eps = 1e-12
+
+    def _grp(pred, label):
+        oks = [ok for p, ok in norm_pairs if pred(p)]
+        return {
+            "n": len(oks),
+            "acc": (sum(oks) / len(oks)) if oks else None,
+            "label": label,
+        }
+
+    lo_raw = LOW_MAX_PROB * conf_scale
+    hi_raw = HIGH_MIN_PROB * conf_scale
     groups = {
-        "low(<=%d)" % LOW_HI: _grp(lambda c: c <= LOW_HI),
-        "mid": _grp(lambda c: LOW_HI < c < HI_LO),
-        "high(>=%d)" % HI_LO: _grp(lambda c: c >= HI_LO),
+        "low": _grp(lambda p: p <= LOW_MAX_PROB + eps, "low(<=%g / <=%.0f%%)" % (lo_raw, 100 * LOW_MAX_PROB)),
+        "mid": _grp(lambda p: LOW_MAX_PROB + eps < p < HIGH_MIN_PROB - eps, "mid"),
+        "high": _grp(lambda p: p >= HIGH_MIN_PROB - eps, "high(>=%g / >=%.0f%%)" % (hi_raw, 100 * HIGH_MIN_PROB)),
     }
-    return {"n": n, "per_value": per_value, "groups": groups,
-            "ece": ece, "mce": mce}
+    return {
+        "n": n,
+        "conf_scale": conf_scale,
+        "thresholds": {"low_max_prob": LOW_MAX_PROB, "high_min_prob": HIGH_MIN_PROB},
+        "per_value": per_value,
+        "groups": groups,
+        "ece": ece,
+        "mce": mce,
+    }
 
 
 def gate(rel):
     """PASS / FAIL / INSUFFICIENT with reasons."""
     n = rel["n"]
-    lo = rel["groups"]["low(<=%d)" % LOW_HI]
-    hi = rel["groups"]["high(>=%d)" % HI_LO]
+    lo = rel["groups"]["low"]
+    hi = rel["groups"]["high"]
     reasons = []
     if n < MIN_TOTAL:
         return "INSUFFICIENT", ["only %d scored predictions (need >=%d)" % (n, MIN_TOTAL)]
@@ -222,10 +283,11 @@ def report(pairs, conf_scale=10.0, title="CONVICTION CALIBRATION GATE"):
     for c, d in rel["per_value"].items():
         print("  %-6g %5d %7.1f%% %7.1f%% %6.3f" % (
             c, d["n"], 100 * d["acc"], 100 * d["conf"], d["gap"]))
-    print("\ngrouped")
+    print("\ngrouped (normalized probability bins)")
     for name, g in rel["groups"].items():
         acc = ("%.1f%%" % (100 * g["acc"])) if g["acc"] is not None else "n/a"
-        print("  %-12s n=%-4d acc=%s" % (name, g["n"], acc))
+        lbl = g.get("label", name)
+        print("  %-22s n=%-4d acc=%s" % (lbl, g["n"], acc))
     print("\nECE = %.3f   MCE = %.3f" % (rel["ece"], rel["mce"]))
     verdict, reasons = gate(rel)
     print("\nGATE: %s" % verdict)

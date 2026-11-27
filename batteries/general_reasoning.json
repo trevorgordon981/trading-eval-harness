@@ -1,0 +1,135 @@
+[
+ {
+  "id": "signed_arithmetic",
+  "max_tokens": 80,
+  "prompt": "Compute 14 - 27. Reply with only the signed integer.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "equals_number",
+    "value": -13
+   }
+  ]
+ },
+ {
+  "id": "percentage_math",
+  "max_tokens": 80,
+  "prompt": "A service handles 250 requests per second and traffic rises by 20%. How many requests per second is that? Give the number.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "equals_number",
+    "value": 300
+   }
+  ]
+ },
+ {
+  "id": "constraint_list",
+  "max_tokens": 120,
+  "prompt": "List the three additive primary colors of light, one per line. Do not use the words 'paint' or 'pigment'.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "contains_all",
+    "values": [
+     "red",
+     "green",
+     "blue"
+    ]
+   },
+   {
+    "type": "contains_none",
+    "values": [
+     "paint",
+     "pigment"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "concise_summary",
+  "max_tokens": 120,
+  "prompt": "In at most 2 sentences, explain why automated test suites prefer deterministic inputs.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "max_sentences",
+    "n": 2
+   },
+   {
+    "type": "regex_any",
+    "label": "determinism",
+    "patterns": [
+     "reproduc",
+     "determinis",
+     "consisten",
+     "flak",
+     "reliab"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "tool_lookup",
+  "max_tokens": 120,
+  "prompt": "Use the provided tool to check the current weather in Seattle.",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Fetch current weather conditions for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   }
+  ],
+  "checks": [
+   {
+    "type": "tool_intent",
+    "name": "get_weather"
+   }
+  ]
+ },
+ {
+  "id": "logic_deduction",
+  "max_tokens": 80,
+  "prompt": "All items in bin A are copper. Item X is in bin A. Is Item X copper? Answer YES or NO.",
+  "checks": [
+   {
+    "type": "non_empty"
+   },
+   {
+    "type": "regex_any",
+    "label": "yes",
+    "patterns": [
+     "\\byes\\b"
+    ]
+   },
+   {
+    "type": "regex_none",
+    "label": "no",
+    "patterns": [
+     "\\bno\\b"
+    ]
+   }
+  ]
+ }
+]

@@ -33,6 +33,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GG_ROOT = os.path.expanduser(os.environ.get("GG_ROOT") or SCRIPT_DIR)
@@ -50,16 +51,58 @@ DEF_CORPORA = [
 ]
 
 
+NEAR_DUP_JACCARD = 0.85
+NEAR_DUP_MIN_TOKENS = 6
+
+
 def _h(s):
     return hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()
 
 
 def _norm(s):
-    return " ".join((s or "").split()).strip()
+    """Canonical whitespace + Unicode NFKC normalization."""
+    s = unicodedata.normalize("NFKC", s or "")
+    return " ".join(s.split()).strip()
+
+
+def _canon(s):
+    """Canonical case-folded, whitespace-collapsed normalization."""
+    return _norm(s).casefold()
 
 
 def _phash(s):
     return hashlib.sha1(_norm(s).encode("utf-8", "replace")).hexdigest()
+
+
+def _chash(s):
+    return hashlib.sha1(_canon(s).encode("utf-8", "replace")).hexdigest()
+
+
+def _token_shingles(s, k=3):
+    """Normalized alphanumeric token k-shingles for near-duplicate detection."""
+    toks = re.findall(r"[a-z0-9]+", _canon(s))
+    if len(toks) < NEAR_DUP_MIN_TOKENS:
+        return frozenset()
+    if len(toks) <= k:
+        return frozenset([tuple(toks)])
+    return frozenset(tuple(toks[i:i + k]) for i in range(len(toks) - k + 1))
+
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if not inter:
+        return 0.0
+    return inter / len(a | b)
+
+
+def _scenario_id(row, fallback_idx):
+    """Return a stable scenario identifier for a held-out JSONL row."""
+    if isinstance(row, dict) and row.get("id") is not None:
+        return str(row["id"])
+    u = _msg(row, "user")
+    return "row_%04d_%s" % (fallback_idx, _phash(u)[:10])
 
 
 # Canonical real-trade setup pattern & key function (identical to eval_v4.trade_key,
@@ -114,16 +157,19 @@ def _iter_battery_files():
 
 
 def _battery_prompts(path):
-    """Yield (id, prompt_text) for every item/scenario in a battery file."""
+    """Return (prompts_list, unscannable_count) for every item/scenario in a battery file."""
     with open(path, encoding="utf-8") as f:
         d = json.load(f)
     items = d
     if isinstance(d, dict):
         items = d.get("scenarios") or d.get("items") or []
     if not isinstance(items, list):
-        return
+        return [], 1
+    prompts = []
+    unscannable = 0
     for it in items:
         if not isinstance(it, dict):
+            unscannable += 1
             continue
         pid = it.get("id")
         prompt = it.get("prompt")
@@ -131,7 +177,10 @@ def _battery_prompts(path):
             turns = it.get("turns") or []
             prompt = " ".join(x for x in turns if isinstance(x, str))
         if pid is not None and prompt and _norm(prompt):
-            yield str(pid), prompt
+            prompts.append((str(pid), prompt))
+        else:
+            unscannable += 1
+    return prompts, unscannable
 
 
 def _resolve_corpus_files(spec):
@@ -162,16 +211,21 @@ def _resolve_corpus_files(spec):
     return [spec]
 
 
-def _corpus_user_hashes(spec):
+def _corpus_user_index(spec):
     """spec = a dir (uses train.jsonl+valid.jsonl), file, or glob.
 
-    Returns (hashes, files). Fails closed by raising FileNotFoundError or
-    ValueError if the corpus path is missing, matches zero files, or yields
-    zero non-empty user-message entries.
+    Returns dict with normalized exact hashes, canonical casefold hashes,
+    token-shingle sets (for near-duplicate detection), files, and unscannable_lines.
+    Fails closed by raising FileNotFoundError or ValueError if the corpus path is
+    missing, matches zero files, or yields zero non-empty user-message entries.
     """
     files = _resolve_corpus_files(spec)
     hashes = set()
+    canon_hashes = set()
+    shingles = []
+    seen_shingles = set()
     records = 0
+    unscannable = 0
     for p in files:
         with open(p, encoding="utf-8") as f:
             for line in f:
@@ -181,21 +235,46 @@ def _corpus_user_hashes(spec):
                 try:
                     r = json.loads(line)
                 except Exception:
+                    unscannable += 1
                     continue
                 if not isinstance(r, dict):
+                    unscannable += 1
                     continue
                 records += 1
+                found_user = False
                 for m in r.get("messages", []):
                     if isinstance(m, dict) and m.get("role") == "user":
                         content = _norm(m.get("content") or "")
                         if content:
+                            found_user = True
                             hashes.add(_phash(content))
+                            ch = _chash(content)
+                            canon_hashes.add(ch)
+                            if ch not in seen_shingles:
+                                seen_shingles.add(ch)
+                                sh = _token_shingles(content)
+                                if sh:
+                                    shingles.append(sh)
+                if not found_user:
+                    unscannable += 1
     if records == 0 or not hashes:
         raise ValueError(
             "corpus yielded 0 user-message entries (%d JSON record(s) across %d file[s]): %s"
             % (records, len(files), spec)
         )
-    return hashes, files
+    return {
+        "hashes": hashes,
+        "canon_hashes": canon_hashes,
+        "shingles": shingles,
+        "files": files,
+        "unscannable": unscannable,
+    }
+
+
+def _corpus_user_hashes(spec):
+    """Backward-compatible wrapper returning (hashes, files)."""
+    idx = _corpus_user_index(spec)
+    return idx["hashes"], idx["files"]
 
 
 def _corpus_label(spec, existing):
@@ -224,24 +303,27 @@ def cmd_battery_scan(args):
         print("VERDICT: INVALID_CORPUS — no training corpora configured for scan.")
         sys.exit(2)
 
-    # build per-corpus user-message hash sets (fail closed on any missing/empty corpus)
-    corp_hashes = {}
+    # build per-corpus user-message indexes (fail closed on any missing/empty corpus)
+    corp_idx = {}
     corp_files = {}
     corpus_errors = []
+    unscannable_corpus_rows = 0
     for c in corpora:
-        name = _corpus_label(c, corp_hashes)
+        name = _corpus_label(c, corp_idx)
         try:
-            h, files = _corpus_user_hashes(c)
+            idx = _corpus_user_index(c)
         except (FileNotFoundError, ValueError, OSError) as exc:
             corpus_errors.append(str(exc))
             print("ERROR: %s" % exc, file=sys.stderr)
             continue
-        corp_hashes[name] = h
-        corp_files[name] = files
-        print("corpus %-24s %6d unique user-msg hashes  (%d file[s])" % (name, len(h), len(files)))
+        corp_idx[name] = idx
+        corp_files[name] = idx["files"]
+        unscannable_corpus_rows += idx["unscannable"]
+        print("corpus %-24s %6d unique user-msg hashes  (%d file[s], %d unscannable)" % (
+            name, len(idx["hashes"]), len(idx["files"]), idx["unscannable"]))
 
     total_corpus_files = sum(len(fs) for fs in corp_files.values())
-    any_hashes = set().union(*corp_hashes.values()) if corp_hashes else set()
+    any_hashes = set().union(*(idx["hashes"] for idx in corp_idx.values())) if corp_idx else set()
     if corpus_errors or total_corpus_files == 0 or not any_hashes:
         print(
             "VERDICT: INVALID_CORPUS — contamination gate failed closed "
@@ -257,39 +339,62 @@ def cmd_battery_scan(args):
         sys.exit(2)
 
     contaminated = {}        # battery_rel -> [ids]
-    counts = {}              # battery_rel -> {corpus: n, "any": n}
+    near_duplicates = {}     # battery_rel -> [ids]
+    counts = {}              # battery_rel -> {corpus: n, "exact": n, "near_duplicate": n, "any": n}
     contam_phashes = set()   # normalized-prompt sha1 of every contaminated prompt
     battery_errors = []
     total_prompts = 0
-    total_contam = 0
+    total_exact = 0
+    total_near_dup = 0
+    unscannable_battery_items = 0
     for bf in battery_files:
         rel = os.path.relpath(bf, GG_ROOT)
         ids_hit = []
-        per_corp = {name: 0 for name in corp_hashes}
+        near_ids_hit = []
+        per_corp = {name: 0 for name in corp_idx}
+        exact_n = 0
+        near_n = 0
         try:
-            prompts = list(_battery_prompts(bf))
+            prompts, bad_items = _battery_prompts(bf)
         except Exception as exc:
             msg = "failed to parse battery file %s: %s" % (bf, exc)
             battery_errors.append(msg)
             print("ERROR: %s" % msg, file=sys.stderr)
             continue
+        unscannable_battery_items += bad_items
         for pid, prompt in prompts:
             total_prompts += 1
             ph = _phash(prompt)
-            hit_any = False
-            for name, hs in corp_hashes.items():
-                if ph in hs:
+            ch = _chash(prompt)
+            sh = _token_shingles(prompt)
+            hit_exact = False
+            hit_near = False
+            for name, idx in corp_idx.items():
+                if ph in idx["hashes"] or ch in idx["canon_hashes"]:
                     per_corp[name] += 1
-                    hit_any = True
-            if hit_any:
+                    hit_exact = True
+                elif sh and any(_jaccard(sh, csh) >= NEAR_DUP_JACCARD for csh in idx["shingles"]):
+                    per_corp[name] += 1
+                    hit_near = True
+            if hit_exact:
+                exact_n += 1
                 ids_hit.append(pid)
+                contam_phashes.add(ph)
+            elif hit_near:
+                near_n += 1
+                ids_hit.append(pid)
+                near_ids_hit.append(pid)
                 contam_phashes.add(ph)
         if ids_hit:
             contaminated[rel] = ids_hit
-            counts[rel] = dict(per_corp, **{"any": len(ids_hit)})
-            total_contam += len(ids_hit)
+            if near_ids_hit:
+                near_duplicates[rel] = near_ids_hit
+            counts[rel] = dict(per_corp, **{"exact": exact_n, "near_duplicate": near_n, "any": len(ids_hit)})
+            total_exact += exact_n
+            total_near_dup += near_n
             print("  CONTAMINATED %-46s %3d prompt(s)  %s" % (rel, len(ids_hit), counts[rel]))
 
+    total_contam = total_exact + total_near_dup
     if battery_errors or total_prompts == 0:
         print(
             "ERROR: battery scan invalid (%d prompt(s) scanned, %d parse error(s))"
@@ -305,30 +410,43 @@ def cmd_battery_scan(args):
     out = {
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "verdict": "CONTAMINATED" if total_contam else "CLEAN",
-        "match_rule": "normalized-whitespace exact prompt vs any training user message (sha1)",
+        "match_rule": (
+            "canonical whitespace+NFKC+casefold exact match + "
+            "3-token shingle Jaccard>=%.2f near-duplicate check" % NEAR_DUP_JACCARD
+        ),
         "scanned_corpus_files": total_corpus_files,
         "scanned_corpus_hashes": len(any_hashes),
         "scanned_prompts": total_prompts,
+        "exact_matches": total_exact,
+        "near_duplicate_matches": total_near_dup,
+        "unscannable_corpus_rows": unscannable_corpus_rows,
+        "unscannable_battery_items": unscannable_battery_items,
         "corpora": {name: corp_files[name] for name in corp_files},
         "counts": counts,
         "contaminated": contaminated,
+        "near_duplicates": near_duplicates,
         "contaminated_prompt_sha1": sorted(contam_phashes),
     }
     outpath = args.out or os.path.join(GG_ROOT, "results", "contaminated_ids.json")
     os.makedirs(os.path.dirname(os.path.abspath(outpath)), exist_ok=True)
     with open(outpath, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=1)
-    print("\nscanned %d battery prompts across %d file[s]; %d contaminated -> %s"
-          % (total_prompts, len(battery_files), total_contam, outpath))
+    print(
+        "\nscanned %d battery prompts across %d file[s]; exact=%d near_dup=%d "
+        "unscannable_corpus=%d unscannable_battery=%d -> %s"
+        % (total_prompts, len(battery_files), total_exact, total_near_dup,
+           unscannable_corpus_rows, unscannable_battery_items, outpath)
+    )
     # reproduce the headline 314-battery numbers explicitly
     for rel, c in sorted(counts.items()):
         if "trading_gauntlet_314" in rel:
             print("  [314 battery] " + "  ".join("%s=%d" % (k, v) for k, v in c.items()))
     if total_contam:
-        print("VERDICT: CONTAMINATED — %d battery prompt(s) appear verbatim in training data. "
-              "Scoring should split clean vs contaminated (report.py reads %s)." % (total_contam, outpath))
+        print("VERDICT: CONTAMINATED — %d battery prompt(s) matched training data "
+              "(exact=%d, near_dup=%d). Scoring should split clean vs contaminated (%s)."
+              % (total_contam, total_exact, total_near_dup, outpath))
         sys.exit(1)
-    print("VERDICT: CLEAN — no battery prompt appears verbatim in the scanned corpora.")
+    print("VERDICT: CLEAN — no battery prompt matched the scanned corpora.")
     sys.exit(0)
 
 
@@ -423,14 +541,15 @@ def main():
 
     # ---- CHECK 1: TESTHOLDOUT trade-keys absent from training rows ----------
     hits = []
+    unscannable_trade_rows = 0
     for r in train_rows:
         try:
             if trade_key(r) in holdkeys:
                 hits.append((r.get("meta", {}) or {}).get("ticker"))
         except Exception:
-            continue  # rows without the real-trade shape can't collide
-    print("\nCHECK 1  real-P&L holdout keys: %d keys vs %d training rows -> %d hits"
-          % (len(holdkeys), len(train_rows), len(hits)))
+            unscannable_trade_rows += 1  # rows without the real-trade shape can't collide
+    print("\nCHECK 1  real-P&L holdout keys: %d keys vs %d training rows -> %d hits (%d non-trade/unscannable)"
+          % (len(holdkeys), len(train_rows), len(hits), unscannable_trade_rows))
     if hits:
         bad = 1
         print("  CONTAMINATED — held-back trades present in training: %s"
@@ -438,30 +557,85 @@ def main():
     else:
         print("  DISJOINT")
 
-    # ---- CHECK 2: 584 held-out rows absent from training rows ---------------
-    train_user = {_h(_msg(r, "user")) for r in train_rows if _msg(r, "user").strip()}
-    train_pair = {_h(_msg(r, "user") + "\x00" + _msg(r, "assistant"))
-                  for r in train_rows if _msg(r, "user").strip()}
-    if not train_user:
+    # ---- CHECK 2: held-out rows absent from training rows (canonical + near-dup) ----
+    train_user_raw = set()
+    train_user_norm = set()
+    train_user_canon = set()
+    train_pair_raw = set()
+    train_pair_norm = set()
+    train_shingles = []
+    seen_train_canon = set()
+    unscannable_train = 0
+    for r in train_rows:
+        u = _msg(r, "user")
+        if not _norm(u):
+            unscannable_train += 1
+            continue
+        a = _msg(r, "assistant")
+        train_user_raw.add(_h(u))
+        train_user_norm.add(_phash(u))
+        ch = _chash(u)
+        train_user_canon.add(ch)
+        train_pair_raw.add(_h(u + "\x00" + a))
+        train_pair_norm.add(_h(_canon(u) + "\x00" + _canon(a)))
+        if ch not in seen_train_canon:
+            seen_train_canon.add(ch)
+            sh = _token_shingles(u)
+            if sh:
+                train_shingles.append(sh)
+
+    if not train_user_norm:
         print("ERROR: training corpus has 0 non-empty user messages in %s" % tdir, file=sys.stderr)
         print("VERDICT: INVALID_CORPUS — training corpus has no user messages.")
         sys.exit(2)
-    held_with_user = [r for r in held if _msg(r, "user").strip()]
+
+    held_with_user = [(idx, r) for idx, r in enumerate(held) if _norm(_msg(r, "user"))]
+    unscannable_held = len(held) - len(held_with_user)
     if not held_with_user:
         print("ERROR: held-out file has 0 non-empty user messages: %s" % heldout_path,
               file=sys.stderr)
         print("VERDICT: INVALID_INPUT — held-out set has no user messages.")
         sys.exit(2)
-    u_hits = sum(1 for r in held_with_user if _h(_msg(r, "user")) in train_user)
-    p_hits = sum(1 for r in held_with_user if _h(_msg(r, "user") + "\x00" +
-                                                 _msg(r, "assistant")) in train_pair)
+
+    raw_u_hits = 0
+    norm_u_hits = 0
+    near_u_hits = 0
+    p_hits = 0
+    hit_scenario_ids = []
+    for idx, r in held_with_user:
+        u = _msg(r, "user")
+        a = _msg(r, "assistant")
+        sid = _scenario_id(r, idx)
+        is_raw = _h(u) in train_user_raw
+        is_norm = _phash(u) in train_user_norm or _chash(u) in train_user_canon
+        is_pair = (_h(u + "\x00" + a) in train_pair_raw) or (_h(_canon(u) + "\x00" + _canon(a)) in train_pair_norm)
+        is_near = False
+        if not is_norm:
+            sh = _token_shingles(u)
+            if sh and any(_jaccard(sh, tsh) >= NEAR_DUP_JACCARD for tsh in train_shingles):
+                is_near = True
+        if is_raw:
+            raw_u_hits += 1
+        if is_norm:
+            norm_u_hits += 1
+        if is_near:
+            near_u_hits += 1
+        if is_pair:
+            p_hits += 1
+        if is_norm or is_near or is_pair:
+            hit_scenario_ids.append(sid)
+
     print("\nCHECK 2  held-out forecasting set: %d rows vs %d training rows"
           % (len(held), len(train_rows)))
-    print("  exact user-message overlaps:            %d" % u_hits)
+    print("  exact user-message overlaps:            %d" % raw_u_hits)
+    print("  normalized user-message overlaps:       %d" % norm_u_hits)
+    print("  near-duplicate user-message overlaps:   %d" % near_u_hits)
     print("  exact (user+assistant) pair overlaps:   %d" % p_hits)
-    if u_hits or p_hits:
+    print("  unscannable rows (train / held-out):    %d / %d" % (unscannable_train, unscannable_held))
+    if norm_u_hits or near_u_hits or p_hits:
         bad = 1
-        print("  CONTAMINATED — held-out setups appear in training data")
+        print("  CONTAMINATED — held-out setups appear in training data (scenario_ids: %s)"
+              % hit_scenario_ids[:10])
     else:
         print("  DISJOINT")
 

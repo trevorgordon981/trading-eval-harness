@@ -1,14 +1,28 @@
 {
   "schema": "gordon-battery-manifest.v1",
-  "_comment": "Profiles name the batteries a run must cover. gauntlet_contract.py reads this to build an immutable run contract, so every name here must exist in batteries/. Add your own domains by dropping <name>.json in batteries/ and listing it below.",
   "profiles": {
-    "trading": [
+    "general": [
+      "general_reasoning"
+    ],
+    "heavy": [
+      "general_reasoning",
       "tickers",
       "trademath",
       "trader"
     ],
     "smoke": [
       "tickers"
+    ],
+    "standard": [
+      "general_reasoning",
+      "tickers",
+      "trademath",
+      "trader"
+    ],
+    "trading": [
+      "tickers",
+      "trademath",
+      "trader"
     ]
   }
 }

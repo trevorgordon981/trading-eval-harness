@@ -389,5 +389,70 @@ class TestVerifyHoldoutDisjointTrainDirMode(unittest.TestCase):
         self.assertEqual(vhd.trade_key(row1), "cb0cd8dfd10014b3")
         self.assertEqual(vhd.trade_key(row2), "2ef4a28fd1dc0481")
 
+    def test_whitespace_equivalent_contamination_fails_holdout_key_gate(self):
+        """EV03: One-space held-out prompt vs double-space training duplicate must exit 1 CONTAMINATED."""
+        tdir = os.path.join(self.tmp.name, "ws_overlap_train")
+        _write_jsonl(
+            os.path.join(tdir, "train.jsonl"),
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "Heldout  setup"},
+                        {"role": "assistant", "content": "{}"},
+                    ]
+                }
+            ],
+        )
+        proc = _run_gate(
+            ["--train-dir", tdir, "--holdout-keys", self.holdout_keys, "--heldout", self.heldout]
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertIn("normalized user-message overlaps:       1", proc.stdout)
+        self.assertIn("VERDICT: CONTAMINATED", proc.stdout)
+
+    def test_near_duplicate_contamination_caught_and_disclosed(self):
+        """EV03: Near-duplicate prompts are detected and exact/near/unscannable counts disclosed."""
+        held = os.path.join(self.tmp.name, "held_near.jsonl")
+        _write_jsonl(
+            held,
+            [
+                {
+                    "id": "scn_near_1",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "Underlying ZXCO at 142.10 up 0.4 percent with 30 day IV at 28 percent and earnings in 9 days what is the setup?",
+                        },
+                        {"role": "assistant", "content": "{}"},
+                    ],
+                },
+                {"messages": [{"role": "assistant", "content": "no user turn"}]},
+            ],
+        )
+        tdir = os.path.join(self.tmp.name, "near_dup_train")
+        _write_jsonl(
+            os.path.join(tdir, "train.jsonl"),
+            [
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "Underlying ZXCO at 142.10 up 0.4 percent with 30 day IV at 28 percent and earnings in 9 days what is the setup today?",
+                        },
+                        {"role": "assistant", "content": "{}"},
+                    ]
+                }
+            ],
+        )
+        proc = _run_gate(
+            ["--train-dir", tdir, "--holdout-keys", self.holdout_keys, "--heldout", held]
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertIn("near-duplicate user-message overlaps:   1", proc.stdout)
+        self.assertIn("unscannable rows (train / held-out):    0 / 1", proc.stdout)
+        self.assertIn("scn_near_1", proc.stdout)
+        self.assertIn("VERDICT: CONTAMINATED", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
