@@ -30,12 +30,16 @@ strictly disjoint targets and prints a reliability-gated scorecard plus verdict:
 Both BASE and FT are queried over OpenAI-compatible `/v1/chat/completions`
 endpoints. The core harness is 100% Python standard library.
 
+**Prerequisite:** **Python >= 3.11** (create the virtual environment with `python3.11` explicitly on macOS so stock system Python 3.9 is not selected).
+
 ## Reproducible offline demo
 
 Verify the entire pipeline locally with zero external APIs or model servers:
 
 ```bash
-python3 offline_demo.py
+python3.11 -m venv .venv
+source .venv/bin/activate
+python offline_demo.py
 ```
 
 `offline_demo.py` launches two deterministic ephemeral mock endpoints on
@@ -239,10 +243,27 @@ The `*.sh` scripts chain common base-only runs using `$MODEL_URL` (default
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests -p "test_*.py" -v
-python3 calibration_gate.py --selftest
-python3 offline_demo.py
+python3.11 -m venv .venv && source .venv/bin/activate
+python -m unittest discover -s tests -p "test_*.py" -v
+python calibration_gate.py --selftest
+python offline_demo.py
 ```
+
+## Measured Results
+
+Verified offline in an isolated Python 3.11.14 virtual environment (Apple Silicon macOS / `Darwin arm64`, 2026-11-27):
+
+- **Unit test suite** (`python -m unittest discover -s tests -p "test_*.py" -v`): **50/50 passed** in **4.41s** (4.48s wall time).
+- **Calibration gate self-test** (`python calibration_gate.py --selftest`): **4/4 fixtures passed** (`PASS`, `FAIL`, `INSUFFICIENT`, `PASS` with high-ECE warning) in **0.05s** wall time.
+- **End-to-end offline demo** (`python offline_demo.py`, 4 stages over ephemeral loopback mocks, **0.64s** wall time):
+  - **Stage 1 (`eval_finetuned.py --mode all`)**:
+    - `held-out` (5 synthetic rows, `case_ids_sha256=ce0d118004b28312`): `valid_coverage` `5/5 (100.0%)` for BASE and FT; `move_acc` `80.0% -> 100.0%` (`+20.0pp`); `dir_acc` `80.0% -> 100.0%` (`+20.0pp`); `vol_change_acc` `100.0% -> 100.0%`; `vs_iv_acc` `100.0% -> 100.0%`; `exp_move_mae` `0.600 -> 0.000` (`-0.600`).
+    - `trading-gauntlet`: `21/21 (100.0%)` objective checks and `13/13 (100.0%)` valid coverage for both BASE and FT (`9` items flagged per model; `18` blind judge packets exported).
+    - `gordon` (`general_reasoning`, disjoint): `14/14 (100.0%)` objective checks and `6/6 (100.0%)` valid coverage for both BASE and FT.
+    - Hash-bound SHA-256 run contracts: BASE and FT both `verified=True` (`manifest_sha256=ac98365dd174ae85`).
+  - **Stage 2 (`calibration_gate.py` on FT held-out)**: `5` scored predictions, `ECE=0.360`, `MCE=0.600`, `GATE: INSUFFICIENT` (enforces `>=30` minimum).
+  - **Stage 3 (`variance.py band`)**: `19/20 (0.950)` vs. `16/20 (0.800)`, `delta=+0.150`, `95% CI=[-0.050, +0.350]`, `MDE=0.200`, `verdict=TIE`.
+  - **Stage 4 (`verify_holdout_disjoint.py --battery-scan`)**: `19` prompts across `4` battery files, `exact=0`, `near_dup=0`, `unscannable=0`, `VERDICT: CLEAN`.
 
 ## License
 
